@@ -1,0 +1,36 @@
+services:
+  # Jaeger for trace visualization
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    pull_policy: always
+    ports:
+      - "16686:16686"  # UI
+      - "14250:14250"  # gRPC collector
+      - "14268:14268"  # HTTP collector
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+
+  # Prometheus for metrics visualization
+  prometheus:
+    image: prom/prometheus:latest
+    pull_policy: always
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+
+  # OpenTelemetry Collector
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    pull_policy: always
+    ports:
+      - "4317:4317"  # OTLP gRPC
+      - "4318:4318"  # OTLP HTTP
+      - "8888:8888"  # Metrics
+      - "8889:8889"  # Prometheus exporter
+    volumes:
+      - ./otel-collector-config.yml:/etc/otel/config.yml
+    command: ["--config=/etc/otel/config.yml"]
+    depends_on:
+      - jaeger
+      - prometheus
