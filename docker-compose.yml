@@ -1,36 +1,77 @@
 services:
-  # Jaeger for trace visualization
-  jaeger:
-    image: jaegertracing/all-in-one:latest
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
     pull_policy: always
     ports:
-      - "16686:16686"  # UI
-      - "14250:14250"  # gRPC collector
-      - "14268:14268"  # HTTP collector
+      - 3000:3000 # UI
     environment:
-      - COLLECTOR_OTLP_ENABLED=true
-
-  # Prometheus for metrics visualization
-  prometheus:
-    image: prom/prometheus:latest
-    pull_policy: always
-    ports:
-      - "9090:9090"
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
-
-  # OpenTelemetry Collector
-  otel-collector:
-    image: otel/opentelemetry-collector-contrib:latest
-    pull_policy: always
-    ports:
-      - "4317:4317"  # OTLP gRPC
-      - "4318:4318"  # OTLP HTTP
-      - "8888:8888"  # Metrics
-      - "8889:8889"  # Prometheus exporter
-    volumes:
-      - ./otel-collector-config.yml:/etc/otel/config.yml
-    command: ["--config=/etc/otel/config.yml"]
+      - ./grafana/datasources:/etc/grafana/provisioning/datasources
+      - ./grafana/dashboards:/etc/grafana/provisioning/dashboards
     depends_on:
-      - jaeger
-      - prometheus
+      - tempo
+      - loki
+      - mimir
+
+  # Tempo for trace visualization
+  tempo:
+    image: grafana/tempo:latest
+    pull_policy: always
+    command:
+      - -config.file=/etc/tempo/tempo.yaml
+      - -target=all
+    ports:
+      - 3200:3200 # UI
+    volumes:
+      - ./tempo/:/etc/tempo/
+
+  # Loki for log aggregation
+  loki:
+    image: grafana/loki:latest
+    pull_policy: always
+    command:
+      - -config.file=/etc/loki/loki.yaml
+      - -target=all
+    ports:
+      - 3100:3100
+    volumes:
+      - ./loki/:/etc/loki/
+
+  # Mimir for metrics (replacing Prometheus)
+  mimir:
+    image: grafana/mimir:latest
+    pull_policy: always
+    command:
+      - -config.file=/etc/mimir/mimir.yaml
+      - -target=all
+    ports:
+      - 9009:9009 # HTTP
+    volumes:
+      - ./mimir/:/etc/mimir/
+
+  # Grafana Alloy for telemetry collection (replacing OpenTelemetry Collector)
+  alloy:
+    image: grafana/alloy:latest
+    pull_policy: always
+    command:
+     - run
+     - /etc/alloy/config.alloy
+     - --storage.path=/tmp/alloy/data
+     - --server.http.listen-addr=0.0.0.0:8080
+     - --stability.level=experimental
+    ports:
+      - 4317:4317 # OTLP gRPC
+      - 4318:4318 # OTLP HTTP
+      - 8080:8080 # UI
+    volumes:
+      - ./alloy/:/etc/alloy/
+    depends_on:
+      - tempo
+      - loki
+      - mimir

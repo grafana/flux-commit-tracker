@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	internallogger "github.com/grafana/flux-commit-tracker/internal/logger"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
@@ -16,7 +17,7 @@ import (
 	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/propagation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
-	"go.opentelemetry.io/otel/sdk/metric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
@@ -34,9 +35,9 @@ const (
 
 // Config holds configuration for OpenTelemetry setup
 type Config struct {
-	// ServiceName is the name of the service in telemetry
+	// ServiceName is the name of the service in OpenTelemetry
 	ServiceName string
-	// ExporterType determines where to send telemetry
+	// ExporterType determines the format of telemetry output
 	ExporterType ExporterType
 	// OTLPEndpoint is the endpoint for OTLP exporters (e.g., "localhost:4317")
 	OTLPEndpoint string
@@ -48,104 +49,101 @@ type Config struct {
 	MetricInterval time.Duration
 }
 
-// DefaultConfig returns a configuration suitable for development
-func DefaultConfig(serviceName string) Config {
-	return Config{
-		ServiceName:    serviceName,
-		ExporterType:   StdoutExporter,
-		OTLPEndpoint:   "localhost:4317",
-		UseInsecure:    true,
-		BatchTimeout:   1 * time.Second,
-		MetricInterval: 15 * time.Second,
+// SetupTelemetry initializes OpenTelemetry with the provided configuration
+// It returns a logger, a shutdown function, and any error that occurred
+func SetupTelemetry(ctx context.Context, config Config) (internallogger.Logger, func(context.Context) error, error) {
+	if config.BatchTimeout == 0 {
+		config.BatchTimeout = 5 * time.Second
 	}
-}
 
-// SetupOTelSDK bootstraps the OpenTelemetry pipeline based on the provided configuration.
-// If it does not return an error, make sure to call shutdown for proper cleanup.
-func SetupOTelSDK(ctx context.Context, config Config) (shutdown func(context.Context) error, err error) {
+	if config.MetricInterval == 0 {
+		config.MetricInterval = 30 * time.Second
+	}
+
 	var shutdownFuncs []func(context.Context) error
 
-	// shutdown calls cleanup functions registered via shutdownFuncs.
-	// The errors from the calls are joined.
-	// Each registered cleanup will be invoked once.
-	shutdown = func(ctx context.Context) error {
+	// Create a shutdown function that calls all registered shutdown functions
+	shutdown := func(ctx context.Context) error {
 		var err error
 		for _, fn := range shutdownFuncs {
 			err = errors.Join(err, fn(ctx))
 		}
-		shutdownFuncs = nil
 		return err
 	}
 
-	// handleErr calls shutdown for cleanup and makes sure that all errors are returned.
-	handleErr := func(inErr error) {
-		err = errors.Join(inErr, shutdown(ctx))
+	// Handle errors by attempting to clean up what's been set up so far
+	handleErr := func(inErr error) (internallogger.Logger, func(context.Context) error, error) {
+		shutdownErr := shutdown(ctx)
+		if shutdownErr != nil {
+			return internallogger.Logger{}, nil, errors.Join(inErr, fmt.Errorf("shutdown error: %v", shutdownErr))
+		}
+		return internallogger.Logger{}, nil, inErr
 	}
 
-	// Create a resource describing the service
+	// Create resource with service attributes
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
 			semconv.ServiceName(config.ServiceName),
 		),
+		resource.WithProcessRuntimeDescription(),
+		resource.WithProcessRuntimeVersion(),
+		resource.WithProcessExecutableName(),
+		resource.WithProcessExecutablePath(),
+		resource.WithTelemetrySDK(),
 	)
 	if err != nil {
-		handleErr(fmt.Errorf("failed to create resource: %w", err))
-		return shutdown, err
+		return handleErr(fmt.Errorf("failed to create resource: %w", err))
 	}
 
-	// Set up propagator.
-	prop := newPropagator()
+	// Set up propagator
+	prop := propagation.NewCompositeTextMapPropagator(
+		propagation.TraceContext{},
+		propagation.Baggage{},
+	)
 	otel.SetTextMapPropagator(prop)
 
-	// Set up trace provider.
-	tracerProvider, err := newTracerProvider(ctx, config, res)
-	if err != nil {
-		handleErr(err)
-		return shutdown, err
-	}
-	shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
-	otel.SetTracerProvider(tracerProvider)
+	// Create logger
+	logger := internallogger.NewLogger(config.ServiceName)
 
-	// Set up meter provider.
-	meterProvider, err := newMeterProvider(ctx, config, res)
+	// Set up logger provider
+	loggerProvider, err := newLoggerProvider(ctx, config, res)
 	if err != nil {
-		handleErr(err)
-		return shutdown, err
-	}
-	shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
-	otel.SetMeterProvider(meterProvider)
-
-	// Set up logger provider.
-	loggerProvider, err := newLoggerProvider(ctx, config)
-	if err != nil {
-		handleErr(err)
-		return shutdown, err
+		return handleErr(err)
 	}
 	shutdownFuncs = append(shutdownFuncs, loggerProvider.Shutdown)
 	global.SetLoggerProvider(loggerProvider)
 
-	return shutdown, nil
+	// Set up tracer provider
+	tracerProvider, err := newTracerProvider(ctx, config, res)
+	if err != nil {
+		return handleErr(err)
+	}
+	shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
+	otel.SetTracerProvider(tracerProvider)
+
+	// Set up meter provider
+	meterReader, err := newMeterReader(ctx, config)
+	if err != nil {
+		return handleErr(err)
+	}
+
+	meterProvider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(meterReader),
+		sdkmetric.WithResource(res),
+	)
+	shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
+	otel.SetMeterProvider(meterProvider)
+
+	return logger, shutdown, nil
 }
 
-func newPropagator() propagation.TextMapPropagator {
-	return propagation.NewCompositeTextMapPropagator(
-		propagation.TraceContext{},
-		propagation.Baggage{},
-	)
-}
+// Helper functions
 
 func newTracerProvider(ctx context.Context, config Config, res *resource.Resource) (*sdktrace.TracerProvider, error) {
 	var traceExporter sdktrace.SpanExporter
+	var sampler sdktrace.Sampler
 
 	switch config.ExporterType {
-	case StdoutExporter:
-		exporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
-		if err != nil {
-			return nil, fmt.Errorf("failed to create stdout trace exporter: %w", err)
-		}
-
-		traceExporter = exporter
-
 	case OTLPExporter:
 		opts := []otlptracegrpc.Option{
 			otlptracegrpc.WithEndpoint(config.OTLPEndpoint),
@@ -161,13 +159,23 @@ func newTracerProvider(ctx context.Context, config Config, res *resource.Resourc
 		}
 
 		traceExporter = exporter
+		sampler = sdktrace.TraceIDRatioBased(0.5)
+
+	case StdoutExporter:
+		exporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
+		if err != nil {
+			return nil, fmt.Errorf("failed to create stdout trace exporter: %w", err)
+		}
+
+		traceExporter = exporter
+		sampler = sdktrace.AlwaysSample()
 
 	default:
 		return nil, fmt.Errorf("unsupported exporter type: %s", config.ExporterType)
 	}
 
 	tracerProvider := sdktrace.NewTracerProvider(
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithSampler(sampler),
 		sdktrace.WithBatcher(traceExporter, sdktrace.WithBatchTimeout(config.BatchTimeout)),
 		sdktrace.WithResource(res),
 	)
@@ -175,17 +183,8 @@ func newTracerProvider(ctx context.Context, config Config, res *resource.Resourc
 	return tracerProvider, nil
 }
 
-func newMeterProvider(ctx context.Context, config Config, res *resource.Resource) (*metric.MeterProvider, error) {
-	var reader metric.Reader
-
+func newMeterReader(ctx context.Context, config Config) (sdkmetric.Reader, error) {
 	switch config.ExporterType {
-	case StdoutExporter:
-		exporter, err := stdoutmetric.New()
-		if err != nil {
-			return nil, fmt.Errorf("failed to create stdout metric exporter: %w", err)
-		}
-		reader = metric.NewPeriodicReader(exporter, metric.WithInterval(config.MetricInterval))
-
 	case OTLPExporter:
 		opts := []otlpmetricgrpc.Option{
 			otlpmetricgrpc.WithEndpoint(config.OTLPEndpoint),
@@ -200,31 +199,24 @@ func newMeterProvider(ctx context.Context, config Config, res *resource.Resource
 			return nil, fmt.Errorf("failed to create OTLP metric exporter: %w", err)
 		}
 
-		reader = metric.NewPeriodicReader(exporter, metric.WithInterval(config.MetricInterval))
+		return sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(config.MetricInterval)), nil
+
+	case StdoutExporter:
+		exporter, err := stdoutmetric.New()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create stdout metric exporter: %w", err)
+		}
+		return sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(config.MetricInterval)), nil
 
 	default:
 		return nil, fmt.Errorf("unsupported exporter type: %s", config.ExporterType)
 	}
-
-	meterProvider := metric.NewMeterProvider(
-		metric.WithReader(reader),
-		metric.WithResource(res),
-	)
-
-	return meterProvider, nil
 }
 
-func newLoggerProvider(ctx context.Context, config Config) (*sdklog.LoggerProvider, error) {
+func newLoggerProvider(ctx context.Context, config Config, res *resource.Resource) (*sdklog.LoggerProvider, error) {
 	var logProcessor sdklog.Processor
 
 	switch config.ExporterType {
-	case StdoutExporter:
-		exporter, err := stdoutlog.New()
-		if err != nil {
-			return nil, fmt.Errorf("failed to create stdout log exporter: %w", err)
-		}
-		logProcessor = sdklog.NewBatchProcessor(exporter)
-
 	case OTLPExporter:
 		opts := []otlploggrpc.Option{
 			otlploggrpc.WithEndpoint(config.OTLPEndpoint),
@@ -241,12 +233,20 @@ func newLoggerProvider(ctx context.Context, config Config) (*sdklog.LoggerProvid
 
 		logProcessor = sdklog.NewBatchProcessor(exporter)
 
+	case StdoutExporter:
+		exporter, err := stdoutlog.New()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create stdout log exporter: %w", err)
+		}
+		logProcessor = sdklog.NewBatchProcessor(exporter)
+
 	default:
 		return nil, fmt.Errorf("unsupported exporter type: %s", config.ExporterType)
 	}
 
 	loggerProvider := sdklog.NewLoggerProvider(
 		sdklog.WithProcessor(logProcessor),
+		sdklog.WithResource(res),
 	)
 
 	return loggerProvider, nil

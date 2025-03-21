@@ -3,23 +3,25 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
+	"github.com/alecthomas/kong"
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 	kustomizev1beta2 "github.com/fluxcd/kustomize-controller/api/v1beta2"
 	"github.com/go-logr/logr"
 	"github.com/grafana/flux-commit-tracker/internal/github"
+	"github.com/grafana/flux-commit-tracker/internal/logger"
 	internalotel "github.com/grafana/flux-commit-tracker/internal/otel"
-	"go.opentelemetry.io/contrib/bridges/otelslog"
+	"go.opentelemetry.io/contrib/bridges/prometheus"
 	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	metricsdk "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/trace"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/fields"
@@ -77,6 +79,39 @@ func init() {
 	}
 }
 
+// CLI represents the command-line interface options
+type CLI struct {
+	MetricsAddr string `help:"The address the metric endpoint binds to." default:":8888"`
+	HealthAddr  string `help:"The address the health endpoint binds to." default:":9440"`
+	KubeContext string `help:"The name of the kubeconfig context to use."`
+
+	TelemetryExporter string `help:"Telemetry exporter type (stdout, otlp)" default:"stdout" enum:"stdout,otlp"`
+	TelemetryEndpoint string `help:"Endpoint for telemetry collector (e.g., localhost:4317)" default:"localhost:4317"`
+	TelemetryInsecure bool   `help:"Use insecure connection for telemetry" default:"true"`
+
+	Token github.TokenAuth `embed:""`
+	App   github.AppAuth   `embed:""`
+}
+
+func (c CLI) Validate(kctx *kong.Context) error {
+	if c.Token.GithubToken == "" && c.App.GithubAppID == 0 {
+		return fmt.Errorf("either GITHUB_TOKEN or GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY and GITHUB_APP_INSTALLATION_ID must be set")
+	}
+
+	return nil
+}
+
+func main() {
+	var cli CLI
+	kCtx := kong.Parse(&cli)
+
+	if err := cli.run(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		kCtx.Exit(1)
+	}
+}
+
+// ControllerConfig holds configuration for the controller
 type ControllerConfig struct {
 	KubeContext        string
 	MetricsAddr        string
@@ -89,45 +124,25 @@ type ControllerConfig struct {
 	TelemetryInsecure bool   // Whether to use insecure connection for OTLP
 }
 
-func main() {
-	config := &ControllerConfig{
-		MetricsAddr: ":8080",
-		HealthAddr:  ":9440",
-
-		TelemetryExporter: "stdout",
-		TelemetryEndpoint: "localhost:4317",
-		TelemetryInsecure: true,
-	}
-
-	flag.StringVar(&config.MetricsAddr, "metrics-addr", config.MetricsAddr, "The address the metric endpoint binds to.")
-	flag.StringVar(&config.HealthAddr, "health-addr", config.HealthAddr, "The address the health endpoint binds to.")
-	flag.StringVar(&config.KubeContext, "kube-context", config.KubeContext, "The name of the kubeconfig context to use.")
-
-	// Telemetry flags
-	flag.StringVar(&config.TelemetryExporter, "telemetry-exporter", config.TelemetryExporter,
-		"Telemetry exporter type (stdout, otlp)")
-	flag.StringVar(&config.TelemetryEndpoint, "telemetry-endpoint", config.TelemetryEndpoint,
-		"Endpoint for telemetry collector (e.g., localhost:4317)")
-	flag.BoolVar(&config.TelemetryInsecure, "telemetry-insecure", config.TelemetryInsecure,
-		"Use insecure connection for telemetry")
-
-	flag.Parse()
-
-	otelHandler := otelslog.NewHandler(OtelName)
-	logger := logr.FromSlogHandler(otelHandler)
-	ctrl.SetLogger(logger)
-
-	client := github.NewGitHubClient(context.Background(), logger, "token")
-
-	if err := run(config, client); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-}
-
 // run contains the main controller logic and returns any errors encountered
-func run(config *ControllerConfig, client *github.GitHub) error {
+func (cli CLI) run() error {
+	logger := logger.NewLogger(OtelName)
+	ctrl.SetLogger(logger.Logger)
 	ctx := ctrl.SetupSignalHandler()
+
+	client, err := github.NewGitHubClient(ctx, logger, cli.Token, cli.App)
+	if err != nil {
+		return fmt.Errorf("unable to create GitHub client: %w", err)
+	}
+
+	config := &ControllerConfig{
+		MetricsAddr:       cli.MetricsAddr,
+		HealthAddr:        cli.HealthAddr,
+		KubeContext:       cli.KubeContext,
+		TelemetryExporter: cli.TelemetryExporter,
+		TelemetryEndpoint: cli.TelemetryEndpoint,
+		TelemetryInsecure: cli.TelemetryInsecure,
+	}
 
 	otelConfig := internalotel.Config{
 		ServiceName:    OtelName,
@@ -138,7 +153,7 @@ func run(config *ControllerConfig, client *github.GitHub) error {
 		MetricInterval: 15 * time.Second,
 	}
 
-	otelShutdown, err := internalotel.SetupOTelSDK(ctx, otelConfig)
+	logger, otelShutdown, err := internalotel.SetupTelemetry(ctx, otelConfig)
 	if err != nil {
 		return fmt.Errorf("unable to set up OpenTelemetry SDK: %w", err)
 	}
@@ -161,6 +176,19 @@ func run(config *ControllerConfig, client *github.GitHub) error {
 	if err != nil {
 		return fmt.Errorf("unable to get kubeconfig: %w", err)
 	}
+
+	bridge := prometheus.NewMetricProducer()
+	reader := metricsdk.NewManualReader(metricsdk.WithProducer(bridge))
+	meterProvider := metricsdk.NewMeterProvider(metricsdk.WithReader(reader))
+	defer func() {
+		// Allow 10 seconds for the metrics to be flushed
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		if err := meterProvider.Shutdown(ctx); err != nil {
+			ctrl.Log.Error(err, "failed to shutdown meter provider")
+		}
+	}()
 
 	options := setupManagerOptions(config)
 
@@ -240,10 +268,10 @@ type KustomizationReconciler struct {
 	client.Client
 
 	log          logr.Logger
-	githubClient *github.GitHub
+	githubClient github.GitHub
 }
 
-func setupController(mgr ctrl.Manager, client *github.GitHub) error {
+func setupController(mgr ctrl.Manager, client github.GitHub) error {
 	return (&KustomizationReconciler{
 		Client: mgr.GetClient(),
 
@@ -257,6 +285,18 @@ func (r *KustomizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&kustomizev1.Kustomization{}).
 		WithEventFilter(kustomizationPredicate{}).
 		Complete(r)
+}
+
+func LogWithTraceContext(ctx context.Context, logger logr.Logger) logr.Logger {
+	spanContext := trace.SpanContextFromContext(ctx)
+	if !spanContext.IsValid() {
+		return logger
+	}
+
+	return logger.WithValues(
+		"trace_id", spanContext.TraceID().String(),
+		"span_id", spanContext.SpanID().String(),
+	)
 }
 
 // Reconcile is the main reconciliation loop for Kustomization resources
@@ -318,7 +358,7 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		break
 	}
 
-	log := r.log.WithValues("kube_manifests_hash", hash, "flux_apply_time", timeApplied.UTC().String())
+	log := LogWithTraceContext(ctx, r.log).WithValues("kube_manifests_hash", hash, "flux_apply_time", timeApplied.UTC().String())
 	log.Info("detected flux apply")
 
 	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)

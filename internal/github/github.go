@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptrace"
-	"os"
 	"time"
 
-	"github.com/go-logr/logr"
+	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v69/github"
+	internallogger "github.com/grafana/flux-commit-tracker/internal/logger"
+	"github.com/gregjones/httpcache"
+	"github.com/hashicorp/go-retryablehttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel"
@@ -28,6 +30,16 @@ const (
 var (
 	tracer = otel.Tracer(OtelName)
 )
+
+type TokenAuth struct {
+	GithubToken string `env:"GITHUB_TOKEN" hidden:"" help:"GitHub personal access token" xor:"token"`
+}
+
+type AppAuth struct {
+	GithubAppID             int64  `env:"GITHUB_APP_ID" hidden:"" help:"GitHub App ID" and:"app" xor:"token"`
+	GithubAppPrivateKey     []byte `env:"GITHUB_APP_PRIVATE_KEY" hidden:"" help:"GitHub App private key" and:"app"`
+	GithubAppInstallationID int64  `env:"GITHUB_APP_INSTALLATION_ID" hidden:"" help:"GitHub App installation ID" and:"app"`
+}
 
 type GitHubRepo struct {
 	Owner string
@@ -52,32 +64,82 @@ type CommitInfo struct {
 }
 
 type GitHub struct {
-	logger logr.Logger
+	logger internallogger.Logger
 	client *github.Client
 }
 
-func NewGitHubClient(ctx context.Context, logger logr.Logger, token string) *GitHub {
-	tc := &http.Client{
-		Transport: otelhttp.NewTransport(
-			http.DefaultTransport,
-			otelhttp.WithClientTrace(func(ctx context.Context) *httptrace.ClientTrace {
-				return otelhttptrace.NewClientTrace(ctx)
-			}),
-		),
-	}
-	if token := os.Getenv("GITHUB_TOKEN"); token != "" {
-		ts := oauth2.StaticTokenSource(
-			&oauth2.Token{AccessToken: token},
-		)
+// cachingRetryableTracingTransport creates a HTTP RoundTripper that uses a
+// retryable HTTP client with caching and tracing capabilities. It uses the
+// retryablehttp package to handle retries and the httpcache package to cache
+// responses. The tracing is done using the OpenTelemetry library, which allows
+// for distributed tracing of HTTP requests. The logger is used to log
+// information about the requests and responses.
+//
+// The function returns a RoundTripper that can be used to make HTTP requests with
+// retry, caching, and tracing capabilities.
+func cachingRetryableTracingTransport(logger internallogger.Logger) http.RoundTripper {
+	retryableClient := retryablehttp.NewClient()
+	retryableClient.Logger = logger
 
-		clientCtx := context.WithValue(ctx, oauth2.HTTPClient, tc)
-		tc = oauth2.NewClient(clientCtx, ts)
-	}
+	tracingCachingTransport := otelhttp.NewTransport(
+		retryableClient.HTTPClient.Transport,
+		otelhttp.WithClientTrace(func(ctx context.Context) *httptrace.ClientTrace {
+			return otelhttptrace.NewClientTrace(ctx)
+		}),
+	)
 
-	return &GitHub{
+	httpCache := httpcache.NewMemoryCacheTransport()
+	httpCache.Transport = tracingCachingTransport
+
+	retryableClient.HTTPClient.Transport = httpCache
+
+	return &retryablehttp.RoundTripper{
+		Client: retryableClient,
+	}
+}
+
+func authenticateWithToken(ctx context.Context, logger internallogger.Logger, token string) GitHub {
+	src := oauth2.StaticTokenSource(
+		&oauth2.Token{AccessToken: token},
+	)
+
+	clientCtx := context.WithValue(ctx, oauth2.HTTPClient, &http.Client{
+		Transport: cachingRetryableTracingTransport(logger),
+	})
+	httpClient := oauth2.NewClient(clientCtx, src)
+	githubClient := github.NewClient(httpClient)
+
+	return GitHub{
 		logger: logger,
-		client: github.NewClient(tc),
+		client: githubClient,
 	}
+}
+
+func authenticateWithApp(logger internallogger.Logger, appID int64, installationID int64, privateKey []byte) (GitHub, error) {
+	itr, err := ghinstallation.New(cachingRetryableTracingTransport(logger), appID, installationID, privateKey)
+	if err != nil {
+		return GitHub{}, fmt.Errorf("failed to create GitHub App installation transport: %w", err)
+	}
+
+	githubClient := github.NewClient(&http.Client{Transport: itr})
+
+	return GitHub{
+		logger: logger,
+		client: githubClient,
+	}, nil
+}
+
+func NewGitHubClient(ctx context.Context, logger internallogger.Logger, tokenAuth TokenAuth, appAuth AppAuth) (GitHub, error) {
+	// If a GitHub token is provided, use it to authenticate in preference to
+	// App authentication
+	if tokenAuth.GithubToken != "" {
+		logger.Debug("Using GitHub token for authentication")
+		return authenticateWithToken(ctx, logger, tokenAuth.GithubToken), nil
+	}
+
+	// Otherwise, use the App authentication flow
+	logger.Debug("Using GitHub App for authentication")
+	return authenticateWithApp(logger, appAuth.GithubAppID, appAuth.GithubAppInstallationID, []byte(appAuth.GithubAppPrivateKey))
 }
 
 func (g *GitHub) GetFile(ctx context.Context, repo GitHubRepo, path, ref string) ([]byte, error) {

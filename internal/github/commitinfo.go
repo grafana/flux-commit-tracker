@@ -46,6 +46,7 @@ func (g *GitHub) FetchCommitInfo(ctx context.Context, kubeManifests GitHubRepo, 
 	{
 		_, unmarshalSpan := tracer.Start(ctx, "github.unmarshal_exporter_info")
 		defer unmarshalSpan.End()
+
 		if err := json.Unmarshal(data, &info); err != nil {
 			unmarshalSpan.RecordError(err)
 			unmarshalSpan.SetStatus(codes.Error, "Failed to parse exporter info")

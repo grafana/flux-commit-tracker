@@ -6,7 +6,6 @@ receivers:
       http:
         endpoint: 0.0.0.0:4318
 
-
 processors:
   batch:
     timeout: 1s
@@ -27,6 +26,21 @@ exporters:
       insecure: true
       insecure_skip_verify: true
 
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+      insecure_skip_verify: true
+
+  otlp/mimir:
+    endpoint: mimir:9009
+    tls:
+      insecure: true
+      insecure_skip_verify: true
+
+  loki:
+    endpoint: http://loki:3100/loki/api/v1/push
+
   debug:
     verbosity: detailed
 
@@ -35,14 +49,14 @@ service:
     traces:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [otlp/jaeger, debug]
+      exporters: [otlp/tempo, debug]
 
     metrics:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [prometheus, debug]
+      exporters: [otlp/mimir, debug]
 
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [debug]
+      exporters: [loki, debug]

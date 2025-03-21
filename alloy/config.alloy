@@ -1,0 +1,55 @@
+logging {
+	level  = "info"
+	format = "logfmt"
+}
+
+otelcol.receiver.otlp "default" {
+  http {}
+  grpc {}
+
+  output {
+		metrics = [otelcol.processor.batch.default.input]
+    logs    = [otelcol.processor.batch.default.input]
+    traces  = [otelcol.processor.batch.default.input]
+  }
+}
+
+otelcol.processor.batch "default" {
+    output {
+        logs = [otelcol.exporter.otlphttp.loki.input]
+        metrics = [otelcol.exporter.otlphttp.mimir.input]
+        traces  = [otelcol.exporter.otlp.tempo.input]
+    }
+}
+
+otelcol.exporter.otlphttp "loki" {
+  client {
+    endpoint = "http://loki:3100/otlp"
+
+		tls {
+			insecure = true
+		}
+  }
+
+}
+
+otelcol.exporter.otlphttp "mimir" {
+	client {
+		endpoint = "http://mimir:9009/otlp"
+
+		tls {
+			insecure = true
+		}
+	}
+}
+
+
+otelcol.exporter.otlp "tempo" {
+	client {
+		endpoint = "tempo:4317"
+
+		tls {
+			insecure = true
+		}
+	}
+}

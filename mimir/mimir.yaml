@@ -1,0 +1,58 @@
+multitenancy_enabled: false
+
+server:
+  http_listen_port: 9009
+
+distributor:
+  pool:
+    health_check_ingesters: true
+  ring:
+    kvstore:
+      store: inmemory
+
+ingester_client:
+  grpc_client_config:
+    # Configure the client to allow messages up to 100MB.
+    max_recv_msg_size: 104857600
+    max_send_msg_size: 104857600
+    grpc_compression: gzip
+
+ingester:
+  ring:
+    # We want to start immediately.
+    final_sleep: 0s
+    num_tokens: 512
+    kvstore:
+      store: inmemory
+    replication_factor: 1
+
+store_gateway:
+  sharding_ring:
+    replication_factor: 1
+    kvstore:
+      store: inmemory
+
+blocks_storage:
+  backend: filesystem
+  filesystem:
+    dir: /tmp/mimir/data/tsdb
+  bucket_store:
+    sync_dir: /tmp/mimir/tsdb-sync
+  tsdb:
+    dir: /tmp/mimir/tsdb
+
+ruler:
+  poll_interval: 2s
+  ring:
+    kvstore:
+      store: inmemory
+
+ruler_storage:
+  backend: filesystem
+  filesystem:
+    dir: /tmp/mimir/data/ruler
+
+limits:
+  native_histograms_ingestion_enabled: true
+  max_global_exemplars_per_user: 100000
+  otel_metric_suffixes_enabled: true
