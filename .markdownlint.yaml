@@ -1,0 +1,16 @@
+# Default state for all rules
+default: true
+
+# MD004/ul-style - Unordered list style
+MD004:
+  style: "dash"
+
+# MD013/line-length - Line length
+MD013:
+  line_length: 80
+  tables: false
+
+# MD029/ordered-list-marker - Ordered list item prefix
+MD029:
+  style: "ordered"
+
