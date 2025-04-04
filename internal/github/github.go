@@ -143,11 +143,13 @@ func NewGitHubClient(ctx context.Context, logger *slog.Logger, tokenAuth TokenAu
 
 func (g *GitHub) GetFile(ctx context.Context, logger *slog.Logger, repo GitHubRepo, path, ref string) ([]byte, error) {
 	ctx, span := tracer.Start(ctx, "github.get_file",
+		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
 			attribute.String("github.repo", repo.String()),
 			attribute.String("github.path", path),
 			attribute.String("github.ref", ref),
-		))
+		),
+	)
 	defer span.End()
 
 	logger.DebugContext(ctx, "fetching file", "repo", repo, "path", path, "ref", ref)
@@ -170,6 +172,7 @@ func (g *GitHub) GetFile(ctx context.Context, logger *slog.Logger, repo GitHubRe
 
 	if content == nil || content.Content == nil {
 		span.SetStatus(codes.Error, "fetched content or content data is nil")
+
 		return nil, fmt.Errorf("repository GetContents returned nil content for %s/%s path %s @ %s", repo.Owner, repo.Repo, path, ref)
 	}
 
@@ -177,6 +180,7 @@ func (g *GitHub) GetFile(ctx context.Context, logger *slog.Logger, repo GitHubRe
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "Failed to decode file content")
+
 		return nil, fmt.Errorf("decoding file: %w", err)
 	}
 
@@ -189,6 +193,7 @@ func (g *GitHub) GetFile(ctx context.Context, logger *slog.Logger, repo GitHubRe
 // FetchCommitTime fetches the commit time for a given commit SHA in a repository. Returns the commit time in UTC.
 func (g *GitHub) FetchCommitTime(ctx context.Context, log *slog.Logger, repo GitHubRepo, commitSHA string) (time.Time, error) {
 	ctx, span := tracer.Start(ctx, "github.fetch_commit_time",
+		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
 			attribute.String("github.repo.owner", repo.Owner),
 			attribute.String("github.repo.name", repo.Repo),
@@ -205,6 +210,7 @@ func (g *GitHub) FetchCommitTime(ctx context.Context, log *slog.Logger, repo Git
 		log.ErrorContext(ctx, "failed to get commit from GitHub", "error", err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "Failed to get commit")
+
 		return time.Time{}, fmt.Errorf("failed to get commit %s in %s/%s: %w", commitSHA, repo.Owner, repo.Repo, err)
 	}
 	defer resp.Body.Close()
@@ -214,10 +220,12 @@ func (g *GitHub) FetchCommitTime(ctx context.Context, log *slog.Logger, repo Git
 		log.ErrorContext(ctx, "invalid commit data received", "error", err)
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "Invalid commit data")
+
 		return time.Time{}, err
 	}
 
 	commitTime := repoCommit.Commit.Committer.GetDate().Time
+
 	span.SetAttributes(attribute.String("github.commit.time", commitTime.UTC().String()))
 	span.SetStatus(codes.Ok, "Successfully retrieved commit time")
 	log.DebugContext(ctx, "successfully fetched commit time", "commit.time", commitTime.UTC().String())

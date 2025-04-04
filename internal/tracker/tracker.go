@@ -95,6 +95,7 @@ type KustomizationReconciler struct {
 // apply the manifests.
 func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	ctx, span := tracer.Start(ctx, "reconcile",
+		trace.WithSpanKind(trace.SpanKindConsumer),
 		trace.WithAttributes(
 			attribute.String("k8s.controller.name", "flux-commit-tracker"),
 			attribute.String("k8s.kustomization.name", req.Name),
@@ -107,7 +108,9 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	log := r.Log.With("name", req.Name, "namespace", req.Namespace)
 
 	// Create a subspan for the Get operation
-	getCtx, getSpan := tracer.Start(ctx, "k8s.get.kustomization")
+	getCtx, getSpan := tracer.Start(ctx, "k8s.get.kustomization",
+		trace.WithSpanKind(trace.SpanKindClient),
+	)
 
 	var kustomization kustomizev1.Kustomization
 	err := r.Get(getCtx, req.NamespacedName, &kustomization)
@@ -170,6 +173,8 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 		return ctrl.Result{}, nil
 	}
+
+	span.SetAttributes(attribute.String("repo.kube_manifests.hash", kubeManifestsHash))
 
 	log = log.With("repo.kube_manifests.hash", kubeManifestsHash, "flux.apply_time", timeApplied.UTC().String())
 	log.DebugContext(ctx, "detected flux apply, fetching kube-manifests commit info")
@@ -254,6 +259,8 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			"duration.e2e_deployment_tools_commit_to_flux_apply_seconds", timeFromDeploymentToolsCommitToApply.Seconds(),
 		)
 	}
+
+	span.SetStatus(codes.Ok, "Successfully processed deployment-tools commits")
 
 	return ctrl.Result{}, nil
 }
