@@ -96,7 +96,7 @@ func TestNewGitHubClientWithAppAuthentication(t *testing.T) {
 
 // newClientFromMock returns a new GHClient whose transport is configured to use
 // the provided mockClient.
-func newClientFromMock(t *testing.T, mockClient *http.Client) GitHub {
+func newClientFromMock(t *testing.T, mockClient *http.Client) *gitHubClient {
 	t.Helper()
 
 	// descend through the layers of transports to the bottom-most one, which is
@@ -110,7 +110,7 @@ func newClientFromMock(t *testing.T, mockClient *http.Client) GitHub {
 
 	httpClient := &http.Client{Transport: transport}
 
-	return GitHub{
+	return &gitHubClient{
 		client: github.NewClient(httpClient),
 	}
 }
@@ -228,7 +228,7 @@ func errorReturningHandler(t *testing.T, m mock.EndpointPattern, code int) mock.
 	)
 }
 
-func newErrorReturningClient(t *testing.T, m mock.EndpointPattern, code int) GitHub {
+func newErrorReturningClient(t *testing.T, m mock.EndpointPattern, code int) *gitHubClient {
 	t.Helper()
 
 	return newClientFromMock(t, mock.NewMockedHTTPClient(
@@ -265,7 +265,7 @@ func TestGetFile(t *testing.T) {
 		name        string
 		path        string
 		ref         string
-		setupMock   func(t *testing.T) GitHub
+		setupMock   func(t *testing.T) *gitHubClient
 		want        []byte
 		wantErr     bool
 		expectedErr error
@@ -274,7 +274,7 @@ func TestGetFile(t *testing.T) {
 			name: "get file success",
 			path: "path/to/file",
 			ref:  "main",
-			setupMock: func(t *testing.T) GitHub {
+			setupMock: func(t *testing.T) *gitHubClient {
 				t.Helper()
 				return newClientFromMock(t, mock.NewMockedHTTPClient(
 					mock.WithRequestMatch(
@@ -291,7 +291,7 @@ func TestGetFile(t *testing.T) {
 			name: "get file error",
 			path: "nonexistent",
 			ref:  "main",
-			setupMock: func(t *testing.T) GitHub {
+			setupMock: func(t *testing.T) *gitHubClient {
 				t.Helper()
 
 				return newErrorReturningClient(t, mock.GetReposContentsByOwnerByRepoByPath, http.StatusInternalServerError)

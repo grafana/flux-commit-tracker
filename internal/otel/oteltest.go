@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -170,6 +171,59 @@ func (t *TestTelemetry) ForceMetricCollection(ctx context.Context) (*metricdata.
 func (t *TestTelemetry) Clear() {
 	t.ClearSpans()
 	t.LogExporter.Clear()
+}
+
+// FindMetric searches for a specific metric by name within ResourceMetrics
+func FindMetric(rm *metricdata.ResourceMetrics, name string) *metricdata.Metrics {
+	if rm == nil {
+		return nil
+	}
+
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name == name {
+				// Return a pointer to a copy to avoid unintended modifications
+				metricCopy := m
+				return &metricCopy
+			}
+		}
+	}
+	return nil
+}
+
+// AssertMetricValueExists checks if a metric with the specified name exists.
+func AssertMetricValueExists(t *testing.T, rm *metricdata.ResourceMetrics, name string) {
+	t.Helper()
+
+	metric := FindMetric(rm, name)
+	require.NotNil(t, metric, "Expected metric '%s' not found", name)
+}
+
+// AssertHistogramValue checks if a histogram metric exists and its single data point
+// matches the expected value (within a tolerance).
+func AssertHistogramValue(t *testing.T, rm *metricdata.ResourceMetrics, name string, expectedValue float64) {
+	t.Helper()
+	metric := FindMetric(rm, name)
+	require.NotNil(t, metric, "Metric '%s' not found", name)
+
+	hist, ok := metric.Data.(metricdata.Histogram[float64])
+	require.True(t, ok, "Metric '%s' is not a float64 Histogram", name)
+
+	require.Len(t, hist.DataPoints, 1, "Expected 1 data point for metric '%s', got %d", name, len(hist.DataPoints))
+	dp := hist.DataPoints[0]
+
+	require.Equal(t, uint64(1), dp.Count, "Expected count 1 for metric '%s', got %d", name, dp.Count)
+
+	tolerance := 1e-9
+	require.InDelta(t, expectedValue, dp.Sum, tolerance, "Expected sum %.6f for metric '%s', got %.6f", expectedValue, name, dp.Sum)
+
+	min, ok := dp.Min.Value()
+	require.True(t, ok, "Expected min for metric '%s', got none", name)
+	require.InDelta(t, expectedValue, min, tolerance, "Expected min %.9f for metric '%s', got %.9f", expectedValue, name, dp.Min)
+
+	max, ok := dp.Max.Value()
+	require.True(t, ok, "Expected max for metric '%s', got none", name)
+	require.InDelta(t, expectedValue, max, tolerance, "Expected max %.9f for metric '%s', got %.9f", expectedValue, name, dp.Max)
 }
 
 // testLogExporter is a simple log exporter for testing

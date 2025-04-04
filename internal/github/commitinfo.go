@@ -12,7 +12,8 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-type commitInfo struct {
+// CommitInfo holds basic information about a git commit.
+type CommitInfo struct {
 	Hash    string
 	Message string
 	Author  string
@@ -22,13 +23,13 @@ type commitInfo struct {
 
 type ExporterInfo struct {
 	Commit                 string
-	CommitsSinceLastExport []*commitInfo `json:"commits_since_last_export"`
+	CommitsSinceLastExport []*CommitInfo `json:"commits_since_last_export"`
 	ExportBuildLink        string        `json:"export_build_link"`
 }
 
 // FetchExporterInfo fetches and parses the `exporter-info.json` file produced
 // by `kube-manifests-exporter` for the given ref.
-func (g *GitHub) FetchExporterInfo(ctx context.Context, logger *slog.Logger, kubeManifests GitHubRepo, ref string) (ExporterInfo, error) {
+func (g *gitHubClient) FetchExporterInfo(ctx context.Context, logger *slog.Logger, kubeManifests GitHubRepo, ref string) (ExporterInfo, error) {
 	ctx, span := tracer.Start(ctx, "github.fetch_exporter_info",
 		trace.WithAttributes(
 			attribute.String("github.repo", kubeManifests.String()),

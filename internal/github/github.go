@@ -31,6 +31,13 @@ var (
 	tracer = otel.Tracer(OtelName)
 )
 
+// Client defines the interface for interacting with GitHub.
+type Client interface {
+	GetFile(ctx context.Context, logger *slog.Logger, repo GitHubRepo, path, ref string) ([]byte, error)
+	FetchCommitTime(ctx context.Context, log *slog.Logger, repo GitHubRepo, commitSHA string) (time.Time, error)
+	FetchExporterInfo(ctx context.Context, log *slog.Logger, repo GitHubRepo, ref string) (ExporterInfo, error)
+}
+
 type TokenAuth struct {
 	GithubToken string `env:"GITHUB_TOKEN" hidden:"" help:"GitHub personal access token" xor:"token"`
 }
@@ -58,16 +65,14 @@ func (r RepositoryNotFoundError) Error() string {
 	return fmt.Sprintf("repository %s not found. Could it be private? Check your GitHub credentials.", r.GitHubRepo)
 }
 
-type CommitInfo struct {
-	Hash string
-	Time time.Time
-}
-
-// GitHub is a wrapper around the GitHub client that adds caching, retrying and
-// tracing.
-type GitHub struct {
+// gitHubClient is a wrapper around the GitHub client that adds caching, retrying and
+// tracing. It implements the Client interface.
+type gitHubClient struct {
 	client *github.Client
 }
+
+// Ensure gitHubClient implements the Client interface.
+var _ Client = &gitHubClient{}
 
 // cachingRetryableTracingTransport creates a HTTP RoundTripper that uses a
 // retryable HTTP client with caching and tracing capabilities. It uses the
@@ -99,7 +104,7 @@ func cachingRetryableTracingTransport(logger *slog.Logger) http.RoundTripper {
 	}
 }
 
-func authenticateWithToken(ctx context.Context, logger *slog.Logger, token string) GitHub {
+func authenticateWithToken(ctx context.Context, logger *slog.Logger, token string) *gitHubClient {
 	src := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: token},
 	)
@@ -110,25 +115,25 @@ func authenticateWithToken(ctx context.Context, logger *slog.Logger, token strin
 	httpClient := oauth2.NewClient(clientCtx, src)
 	githubClient := github.NewClient(httpClient)
 
-	return GitHub{
+	return &gitHubClient{
 		client: githubClient,
 	}
 }
 
-func authenticateWithApp(logger *slog.Logger, appID int64, installationID int64, privateKey []byte) (GitHub, error) {
+func authenticateWithApp(logger *slog.Logger, appID int64, installationID int64, privateKey []byte) (*gitHubClient, error) {
 	itr, err := ghinstallation.New(cachingRetryableTracingTransport(logger), appID, installationID, privateKey)
 	if err != nil {
-		return GitHub{}, fmt.Errorf("failed to create GitHub App installation transport: %w", err)
+		return &gitHubClient{}, fmt.Errorf("failed to create GitHub App installation transport: %w", err)
 	}
 
 	githubClient := github.NewClient(&http.Client{Transport: itr})
 
-	return GitHub{
+	return &gitHubClient{
 		client: githubClient,
 	}, nil
 }
 
-func NewGitHubClient(ctx context.Context, logger *slog.Logger, tokenAuth TokenAuth, appAuth AppAuth) (GitHub, error) {
+func NewGitHubClient(ctx context.Context, logger *slog.Logger, tokenAuth TokenAuth, appAuth AppAuth) (*gitHubClient, error) {
 	// If a GitHub token is provided, use it to authenticate in preference to
 	// App authentication
 	if tokenAuth.GithubToken != "" {
@@ -141,7 +146,7 @@ func NewGitHubClient(ctx context.Context, logger *slog.Logger, tokenAuth TokenAu
 	return authenticateWithApp(logger, appAuth.GithubAppID, appAuth.GithubAppInstallationID, appAuth.GithubAppPrivateKey)
 }
 
-func (g *GitHub) GetFile(ctx context.Context, logger *slog.Logger, repo GitHubRepo, path, ref string) ([]byte, error) {
+func (g *gitHubClient) GetFile(ctx context.Context, logger *slog.Logger, repo GitHubRepo, path, ref string) ([]byte, error) {
 	ctx, span := tracer.Start(ctx, "github.get_file",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
@@ -191,7 +196,7 @@ func (g *GitHub) GetFile(ctx context.Context, logger *slog.Logger, repo GitHubRe
 }
 
 // FetchCommitTime fetches the commit time for a given commit SHA in a repository. Returns the commit time in UTC.
-func (g *GitHub) FetchCommitTime(ctx context.Context, log *slog.Logger, repo GitHubRepo, commitSHA string) (time.Time, error) {
+func (g *gitHubClient) FetchCommitTime(ctx context.Context, log *slog.Logger, repo GitHubRepo, commitSHA string) (time.Time, error) {
 	ctx, span := tracer.Start(ctx, "github.fetch_commit_time",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(

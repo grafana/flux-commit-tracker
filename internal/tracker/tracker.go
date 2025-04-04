@@ -30,6 +30,11 @@ const (
 	// OtelNamespace is the namespace used for OpenTelemetry metrics. It's a
 	// prefix on all metric names.
 	OtelNamespace = "flux_commit_tracker"
+
+	// Metric names
+	MetricE2EExportTime                   = OtelNamespace + ".e2e.export-time"
+	MetricKubeManifestsExporterExportTime = OtelNamespace + ".kube-manifests-exporter.export-time"
+	MetricFluxReconcileTime               = OtelNamespace + ".flux.reconcile-time"
 )
 
 var (
@@ -52,7 +57,7 @@ func init() {
 	var err error
 
 	exportTime, err = meter.Float64Histogram(
-		fmt.Sprintf("%s.e2e.export-time", OtelNamespace),
+		MetricE2EExportTime,
 		metric.WithDescription("Time taken from deployment-tools commit to flux apply"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(metricBuckets...),
@@ -62,7 +67,7 @@ func init() {
 	}
 
 	kubeManifestsExporterExportTime, err = meter.Float64Histogram(
-		fmt.Sprintf("%s.kube-manifests-exporter.export-time", OtelNamespace),
+		MetricKubeManifestsExporterExportTime,
 		metric.WithDescription("Time taken from deployment-tools commit to kube-manifests commit"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(metricBuckets...),
@@ -72,7 +77,7 @@ func init() {
 	}
 
 	fluxReconcileTime, err = meter.Float64Histogram(
-		fmt.Sprintf("%s.flux.reconcile-time", OtelNamespace),
+		MetricFluxReconcileTime,
 		metric.WithDescription("Time taken from kube-manifests commit to flux apply"),
 		metric.WithUnit("s"),
 		metric.WithExplicitBucketBoundaries(metricBuckets...),
@@ -88,7 +93,7 @@ type KustomizationReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	Log    *slog.Logger
-	GitHub github.GitHub
+	GitHub github.Client
 }
 
 // getKustomization fetches the Kustomization object from the cluster. It
@@ -128,7 +133,8 @@ func extractReconciledCommit(ctx context.Context, log *slog.Logger, k *kustomize
 		return "", time.Time{}, fmt.Errorf("kustomization `%s` has no last applied revision", k.GroupVersionKind().String())
 	}
 
-	// master@hash1:123456
+	// master@sha1:123456 (sha1 is a literal, not a variable: it's the hash
+	// algorithm)
 	parts := strings.Split(revision, ":")
 	if len(parts) != 2 {
 		log.ErrorContext(ctx, "invalid revision format")
@@ -150,7 +156,7 @@ func extractReconciledCommit(ctx context.Context, log *slog.Logger, k *kustomize
 	if timeApplied.IsZero() {
 		log.InfoContext(ctx, "kustomization has not reconciled successfully yet, skipping")
 
-		return "", time.Time{}, nil
+		return "", time.Time{}, fmt.Errorf("kustomization '%s/%s' has not reconciled successfully yet", k.Namespace, k.Name)
 	}
 
 	return kubeManifestsHash, timeApplied, nil
