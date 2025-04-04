@@ -173,7 +173,12 @@ func (g *gitHubClient) GetFile(ctx context.Context, logger *slog.Logger, repo Gi
 
 		return nil, fmt.Errorf("fetching file: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "Failed to close response body")
+		}
+	}()
 
 	if content == nil || content.Content == nil {
 		span.SetStatus(codes.Error, "fetched content or content data is nil")
@@ -218,7 +223,12 @@ func (g *gitHubClient) FetchCommitTime(ctx context.Context, log *slog.Logger, re
 
 		return time.Time{}, fmt.Errorf("failed to get commit %s in %s/%s: %w", commitSHA, repo.Owner, repo.Repo, err)
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, "Failed to close response body")
+		}
+	}()
 
 	if repoCommit.Commit == nil || repoCommit.Commit.Committer == nil || repoCommit.Commit.Committer.Date == nil {
 		err := fmt.Errorf("commit or committer date is nil in GitHub response")

@@ -143,10 +143,13 @@ func (t *TestTelemetry) SpansByName(name string) []sdktrace.ReadOnlySpan {
 }
 
 // FindSpan returns the first span with the given name, or nil if not found
-func (t *TestTelemetry) FindSpan(ctx context.Context, name string) sdktrace.ReadOnlySpan {
-	t.TraceProcessor.ForceFlush(ctx)
+func (tt *TestTelemetry) FindSpan(t *testing.T, ctx context.Context, name string) sdktrace.ReadOnlySpan {
+	t.Helper()
 
-	spans := t.TraceExporter.GetSpans()
+	err := tt.TraceProcessor.ForceFlush(ctx)
+	require.NoError(t, err)
+
+	spans := tt.TraceExporter.GetSpans()
 	if len(spans) == 0 {
 		return nil
 	}

@@ -55,7 +55,7 @@ func (w *SlogWriter) Write(p []byte) (n int, err error) {
 		Message: string(p),
 	}
 
-	if err := w.Handler.Handle(w.context, record); err != nil {
+	if err := w.Handle(w.context, record); err != nil {
 		return 0, fmt.Errorf("failed to write log: %w", err)
 	}
 
