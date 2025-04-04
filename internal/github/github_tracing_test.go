@@ -55,7 +55,7 @@ func TestTraceInstrumentation(t *testing.T) {
 	path := "path/to/file"
 	ref := "main"
 
-	_, err := ghClient.GetFile(ctx, repo, path, ref)
+	_, err := ghClient.GetFile(ctx, logger, repo, path, ref)
 	require.NoError(t, err)
 
 	span.End()
@@ -89,7 +89,7 @@ func TestTraceInstrumentationWithError(t *testing.T) {
 		Repo:  "repo",
 	}
 
-	_, err := ghClient.GetFile(ctx, repo, "path", "ref")
+	_, err := ghClient.GetFile(ctx, logger, repo, "path", "ref")
 	require.Error(t, err)
 
 	span.End()

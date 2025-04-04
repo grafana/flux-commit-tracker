@@ -5,13 +5,13 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptrace"
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v69/github"
-	internallogger "github.com/grafana/flux-commit-tracker/internal/logger"
 	"github.com/gregjones/httpcache"
 	"github.com/hashicorp/go-retryablehttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace"
@@ -63,8 +63,9 @@ type CommitInfo struct {
 	Time time.Time
 }
 
+// GitHub is a wrapper around the GitHub client that adds caching, retrying and
+// tracing.
 type GitHub struct {
-	logger internallogger.Logger
 	client *github.Client
 }
 
@@ -77,7 +78,7 @@ type GitHub struct {
 //
 // The function returns a RoundTripper that can be used to make HTTP requests with
 // retry, caching, and tracing capabilities.
-func cachingRetryableTracingTransport(logger internallogger.Logger) http.RoundTripper {
+func cachingRetryableTracingTransport(logger *slog.Logger) http.RoundTripper {
 	retryableClient := retryablehttp.NewClient()
 	retryableClient.Logger = logger
 
@@ -98,7 +99,7 @@ func cachingRetryableTracingTransport(logger internallogger.Logger) http.RoundTr
 	}
 }
 
-func authenticateWithToken(ctx context.Context, logger internallogger.Logger, token string) GitHub {
+func authenticateWithToken(ctx context.Context, logger *slog.Logger, token string) GitHub {
 	src := oauth2.StaticTokenSource(
 		&oauth2.Token{AccessToken: token},
 	)
@@ -110,12 +111,11 @@ func authenticateWithToken(ctx context.Context, logger internallogger.Logger, to
 	githubClient := github.NewClient(httpClient)
 
 	return GitHub{
-		logger: logger,
 		client: githubClient,
 	}
 }
 
-func authenticateWithApp(logger internallogger.Logger, appID int64, installationID int64, privateKey []byte) (GitHub, error) {
+func authenticateWithApp(logger *slog.Logger, appID int64, installationID int64, privateKey []byte) (GitHub, error) {
 	itr, err := ghinstallation.New(cachingRetryableTracingTransport(logger), appID, installationID, privateKey)
 	if err != nil {
 		return GitHub{}, fmt.Errorf("failed to create GitHub App installation transport: %w", err)
@@ -124,25 +124,24 @@ func authenticateWithApp(logger internallogger.Logger, appID int64, installation
 	githubClient := github.NewClient(&http.Client{Transport: itr})
 
 	return GitHub{
-		logger: logger,
 		client: githubClient,
 	}, nil
 }
 
-func NewGitHubClient(ctx context.Context, logger internallogger.Logger, tokenAuth TokenAuth, appAuth AppAuth) (GitHub, error) {
+func NewGitHubClient(ctx context.Context, logger *slog.Logger, tokenAuth TokenAuth, appAuth AppAuth) (GitHub, error) {
 	// If a GitHub token is provided, use it to authenticate in preference to
 	// App authentication
 	if tokenAuth.GithubToken != "" {
-		logger.Debug("Using GitHub token for authentication")
+		logger.DebugContext(ctx, "Using GitHub token for authentication")
 		return authenticateWithToken(ctx, logger, tokenAuth.GithubToken), nil
 	}
 
 	// Otherwise, use the App authentication flow
 	logger.Debug("Using GitHub App for authentication")
-	return authenticateWithApp(logger, appAuth.GithubAppID, appAuth.GithubAppInstallationID, []byte(appAuth.GithubAppPrivateKey))
+	return authenticateWithApp(logger, appAuth.GithubAppID, appAuth.GithubAppInstallationID, appAuth.GithubAppPrivateKey)
 }
 
-func (g *GitHub) GetFile(ctx context.Context, repo GitHubRepo, path, ref string) ([]byte, error) {
+func (g *GitHub) GetFile(ctx context.Context, logger *slog.Logger, repo GitHubRepo, path, ref string) ([]byte, error) {
 	ctx, span := tracer.Start(ctx, "github.get_file",
 		trace.WithAttributes(
 			attribute.String("github.repo", repo.String()),
@@ -151,9 +150,9 @@ func (g *GitHub) GetFile(ctx context.Context, repo GitHubRepo, path, ref string)
 		))
 	defer span.End()
 
-	g.logger.Info("fetching file", "repo", repo, "path", path, "ref", ref)
+	logger.DebugContext(ctx, "fetching file", "repo", repo, "path", path, "ref", ref)
 
-	content, _, _, err := g.client.Repositories.GetContents(ctx, repo.Owner, repo.Repo, path, &github.RepositoryContentGetOptions{
+	content, _, resp, err := g.client.Repositories.GetContents(ctx, repo.Owner, repo.Repo, path, &github.RepositoryContentGetOptions{
 		Ref: ref,
 	})
 	if err != nil {
@@ -167,6 +166,12 @@ func (g *GitHub) GetFile(ctx context.Context, repo GitHubRepo, path, ref string)
 
 		return nil, fmt.Errorf("fetching file: %w", err)
 	}
+	defer resp.Body.Close()
+
+	if content == nil || content.Content == nil {
+		span.SetStatus(codes.Error, "fetched content or content data is nil")
+		return nil, fmt.Errorf("repository GetContents returned nil content for %s/%s path %s @ %s", repo.Owner, repo.Repo, path, ref)
+	}
 
 	decoded, err := base64.StdEncoding.DecodeString(*content.Content)
 	if err != nil {
@@ -177,5 +182,45 @@ func (g *GitHub) GetFile(ctx context.Context, repo GitHubRepo, path, ref string)
 
 	span.SetAttributes(attribute.Int("github.file.size_bytes", len(decoded)))
 	span.SetStatus(codes.Ok, "Successfully fetched and decoded file")
+
 	return decoded, nil
+}
+
+// FetchCommitTime fetches the commit time for a given commit SHA in a repository. Returns the commit time in UTC.
+func (g *GitHub) FetchCommitTime(ctx context.Context, log *slog.Logger, repo GitHubRepo, commitSHA string) (time.Time, error) {
+	ctx, span := tracer.Start(ctx, "github.fetch_commit_time",
+		trace.WithAttributes(
+			attribute.String("github.repo.owner", repo.Owner),
+			attribute.String("github.repo.name", repo.Repo),
+			attribute.String("github.commit.sha", commitSHA),
+		),
+	)
+	defer span.End()
+
+	log = log.With("repo.owner", repo.Owner, "repo.name", repo.Repo, "commit.sha", commitSHA)
+	log.DebugContext(ctx, "fetching commit time from GitHub")
+
+	repoCommit, resp, err := g.client.Repositories.GetCommit(ctx, repo.Owner, repo.Repo, commitSHA, nil)
+	if err != nil {
+		log.ErrorContext(ctx, "failed to get commit from GitHub", "error", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Failed to get commit")
+		return time.Time{}, fmt.Errorf("failed to get commit %s in %s/%s: %w", commitSHA, repo.Owner, repo.Repo, err)
+	}
+	defer resp.Body.Close()
+
+	if repoCommit.Commit == nil || repoCommit.Commit.Committer == nil || repoCommit.Commit.Committer.Date == nil {
+		err := fmt.Errorf("commit or committer date is nil in GitHub response")
+		log.ErrorContext(ctx, "invalid commit data received", "error", err)
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "Invalid commit data")
+		return time.Time{}, err
+	}
+
+	commitTime := repoCommit.Commit.Committer.GetDate().Time
+	span.SetAttributes(attribute.String("github.commit.time", commitTime.UTC().String()))
+	span.SetStatus(codes.Ok, "Successfully retrieved commit time")
+	log.DebugContext(ctx, "successfully fetched commit time", "commit.time", commitTime.UTC().String())
+
+	return commitTime, nil
 }

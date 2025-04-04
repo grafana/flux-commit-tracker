@@ -1,16 +1,13 @@
 package github
 
 import (
-	"context"
 	"log/slog"
 	"net/http"
 	"testing"
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
-	"github.com/go-logr/logr"
 	"github.com/google/go-github/v69/github"
-	internallogger "github.com/grafana/flux-commit-tracker/internal/logger"
 	"github.com/gregjones/httpcache"
 	"github.com/hashicorp/go-retryablehttp"
 	"github.com/migueleliasweb/go-github-mock/src/mock"
@@ -20,9 +17,7 @@ import (
 )
 
 var (
-	logger = internallogger.Logger{
-		Logger: logr.FromSlogHandler(slog.DiscardHandler),
-	}
+	logger = slog.New(slog.DiscardHandler)
 
 	content = "aGVsbG8gd29ybGQ=" // base64 encoded "hello world"
 )
@@ -70,7 +65,7 @@ func TestNewGitHubClientWithToken(t *testing.T) {
 func TestNewGitHubClientWithAppAuthentication(t *testing.T) {
 	t.Parallel()
 
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Set up test data
 	appAuth := AppAuth{
@@ -116,8 +111,6 @@ func newClientFromMock(t *testing.T, mockClient *http.Client) GitHub {
 	httpClient := &http.Client{Transport: transport}
 
 	return GitHub{
-		logger: logger,
-
 		client: github.NewClient(httpClient),
 	}
 }
@@ -195,14 +188,14 @@ func TestResponsesAreCached(t *testing.T) {
 
 	ghclient := newClientFromMock(t, mockClient)
 
-	returnedContent, err := ghclient.GetFile(t.Context(), repo, "path/to/file", "README.md")
+	returnedContent, err := ghclient.GetFile(t.Context(), logger, repo, "path/to/file", "README.md")
 	require.NoError(t, err)
 	require.Equal(t, 1, hits)
 	require.Equal(t, http.StatusOK, lastStatusSent)
 	require.Equal(t, []byte("hello world"), returnedContent)
 
 	// this one should be cached, so the mockClient should not be hit
-	returnedContent2, err := ghclient.GetFile(t.Context(), repo, "path/to/file", "README.md")
+	returnedContent2, err := ghclient.GetFile(t.Context(), logger, repo, "path/to/file", "README.md")
 	require.NoError(t, err)
 	require.Equal(t, 1, hits)
 	require.Equal(t, returnedContent, returnedContent2)
@@ -213,7 +206,7 @@ func TestResponsesAreCached(t *testing.T) {
 	// the cache has expired, so the mockClient should be hit again, but this
 	// time with an If-Modified-Since header which should cause the server to
 	// return a 304 Not Modified response
-	returnedContent3, err := ghclient.GetFile(t.Context(), repo, "path/to/file", "README.md")
+	returnedContent3, err := ghclient.GetFile(t.Context(), logger, repo, "path/to/file", "README.md")
 	require.NoError(t, err)
 	require.Equal(t, 2, hits)
 	require.Equal(t, http.StatusNotModified, lastStatusSent)
@@ -256,7 +249,7 @@ func TestGetFile_Success(t *testing.T) {
 	)
 
 	ghClient := newClientFromMock(t, mockedHTTPClient)
-	returnedContent, err := ghClient.GetFile(t.Context(), GitHubRepo{
+	returnedContent, err := ghClient.GetFile(t.Context(), logger, GitHubRepo{
 		Owner: "owner",
 		Repo:  "repo",
 	}, "path/to/file", "README.md")
@@ -311,10 +304,10 @@ func TestGetFile(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			ctx := context.Background()
+			ctx := t.Context()
 			client := tt.setupMock(t)
 
-			got, err := client.GetFile(ctx, GitHubRepo{Owner: "owner", Repo: "repo"}, tt.path, tt.ref)
+			got, err := client.GetFile(ctx, logger, GitHubRepo{Owner: "owner", Repo: "repo"}, tt.path, tt.ref)
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.expectedErr != nil {

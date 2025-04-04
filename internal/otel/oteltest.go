@@ -3,11 +3,9 @@ package otel
 import (
 	"context"
 	"errors"
-	"fmt"
+	"log/slog"
 	"testing"
-	"time"
 
-	internallogger "github.com/grafana/flux-commit-tracker/internal/logger"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -25,7 +23,7 @@ import (
 // TestTelemetry provides testing utilities for OpenTelemetry
 type TestTelemetry struct {
 	// Logger is the test logger
-	Logger internallogger.Logger
+	Logger *slog.Logger
 
 	// Tracer returns a tracer with the given name
 	Tracer trace.Tracer
@@ -51,7 +49,6 @@ type TestTelemetry struct {
 
 // SetupTestTelemetry creates a test environment for OpenTelemetry instrumentation
 func SetupTestTelemetry(ctx context.Context, serviceName string) (*TestTelemetry, error) {
-	// Create resource
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
 			semconv.ServiceName(serviceName),
@@ -62,7 +59,6 @@ func SetupTestTelemetry(ctx context.Context, serviceName string) (*TestTelemetry
 		return nil, err
 	}
 
-	// Set up propagator
 	prop := propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
@@ -92,7 +88,7 @@ func SetupTestTelemetry(ctx context.Context, serviceName string) (*TestTelemetry
 	shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
 	otel.SetMeterProvider(meterProvider)
 
-	logger := internallogger.NewTestLogger(serviceName)
+	logger := slog.New(slog.DiscardHandler)
 	logExporter := newTestLogExporter()
 	logProcessor := sdklog.NewSimpleProcessor(logExporter)
 	loggerProvider := sdklog.NewLoggerProvider(
@@ -232,24 +228,4 @@ nextAttr:
 
 		t.Errorf("Expected attribute %s=%s not found in span", expectedAttr.Key, expectedAttr.Value.AsString())
 	}
-}
-
-// WaitForSpans waits for spans to be processed before returning
-func WaitForSpans(ctx context.Context, telemetry *TestTelemetry, timeout time.Duration) error {
-	deadline := time.Now().Add(timeout)
-
-	for time.Now().Before(deadline) {
-		if len(telemetry.Spans()) > 0 {
-			return nil
-		}
-
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(10 * time.Millisecond):
-			// Continue checking
-		}
-	}
-
-	return fmt.Errorf("timeout waiting for spans to be processed")
 }

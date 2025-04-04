@@ -1,55 +1,75 @@
 package logger
 
 import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"time"
+
 	"github.com/go-logr/logr"
-	"go.opentelemetry.io/contrib/bridges/otelslog"
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/log/logtest"
 )
 
-type Logger struct {
-	logr.Logger
+var (
+	// A log level that is just below the debug level. This is used to write
+	// metric/trace logs to stdout if the trace log level is enabled.
+	LevelTrace = slog.Level(slog.LevelDebug - 1)
+)
+
+// NewDefaultLogger creates a basic slog logger writing JSON to stderr.
+func NewDefaultLogger() *slog.Logger {
+	return slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 }
 
-func NewLogger(otelName string) Logger {
-	otelHandler := otelslog.NewHandler(otelName)
-	logger := logr.FromSlogHandler(otelHandler)
-	otel.SetLogger(logger)
+type LogrSink = logr.LogSink
 
-	return Logger{logger}
+// FromSlog creates a logr.Logger from a slog.Logger.
+// This is needed because controller-runtime uses logr.
+func FromSlog(logger *slog.Logger) logr.Logger {
+	return logr.FromSlogHandler(logger.Handler())
 }
 
-func NewTestLogger(otelName string) Logger {
-	recorder := logtest.NewRecorder()
-	otelLogger := otelslog.NewLogger(
-		otelName,
-		otelslog.WithLoggerProvider(recorder),
-	)
+// SlogWriter wraps a slog.Handler and implements io.Writer, so that it can be
+// used by APIs that expect an io.Writer.
+type SlogWriter struct {
+	slog.Handler
 
-	logger := logr.FromSlogHandler(otelLogger.Handler())
-	otel.SetLogger(logger)
-
-	return Logger{logger}
+	level   slog.Level
+	context context.Context
 }
 
-// These are based on https://github.com/kubernetes/community/blob/35444da79dff9a448e7ecf24b277e5f71373840a/contributors/devel/sig-instrumentation/logging.md#what-method-to-use
-
-func (l Logger) Error(msg string, keysAndValues ...interface{}) {
-	l.V(0).Info(msg, keysAndValues...)
+// NewSlogWriter creates a new SlogWriter with the given handler and optional group
+func NewSlogWriter(ctx context.Context, handler slog.Handler, group string, level slog.Level) *SlogWriter {
+	return &SlogWriter{
+		Handler: handler.WithGroup(group),
+		level:   level,
+		context: ctx,
+	}
 }
 
-func (l Logger) Warn(msg string, keysAndValues ...interface{}) {
-	l.V(1).Info(msg, keysAndValues...)
+// Write implements io.Writer by logging the data at debug level
+func (w *SlogWriter) Write(p []byte) (n int, err error) {
+	record := slog.Record{
+		Time:    time.Now(),
+		Level:   w.level,
+		Message: string(p),
+	}
+
+	if err := w.Handler.Handle(w.context, record); err != nil {
+		return 0, fmt.Errorf("failed to write log: %w", err)
+	}
+
+	return len(p), nil
 }
 
-func (l Logger) Info(msg string, keysAndValues ...interface{}) {
-	l.V(2).Info(msg, keysAndValues...)
-}
+type LogLevel slog.Level
 
-func (l Logger) Debug(msg string, keysAndValues ...interface{}) {
-	l.V(4).Info(msg, keysAndValues...)
-}
+func (l *LogLevel) UnmarshalText(text []byte) error {
+	var level slog.Level
+	if err := level.UnmarshalText(text); err != nil {
+		return err
+	}
 
-func (l Logger) Trace(msg string, keysAndValues ...interface{}) {
-	l.V(5).Info(msg, keysAndValues...)
+	*l = LogLevel(level)
+	return nil
 }

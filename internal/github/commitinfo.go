@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -25,8 +26,10 @@ type ExporterInfo struct {
 	ExportBuildLink        string        `json:"export_build_link"`
 }
 
-func (g *GitHub) FetchCommitInfo(ctx context.Context, kubeManifests GitHubRepo, ref string) (ExporterInfo, error) {
-	ctx, span := tracer.Start(ctx, "github.fetch_commit_info",
+// FetchExporterInfo fetches and parses the `exporter-info.json` file produced
+// by `kube-manifests-exporter` for the given ref.
+func (g *GitHub) FetchExporterInfo(ctx context.Context, logger *slog.Logger, kubeManifests GitHubRepo, ref string) (ExporterInfo, error) {
+	ctx, span := tracer.Start(ctx, "github.fetch_exporter_info",
 		trace.WithAttributes(
 			attribute.String("github.repo", kubeManifests.String()),
 			attribute.String("github.ref", ref),
@@ -34,7 +37,7 @@ func (g *GitHub) FetchCommitInfo(ctx context.Context, kubeManifests GitHubRepo, 
 		))
 	defer span.End()
 
-	data, err := g.GetFile(ctx, kubeManifests, "exporter-info.json", ref)
+	data, err := g.GetFile(ctx, logger, kubeManifests, "exporter-info.json", ref)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "Failed to fetch exporter info")
@@ -44,7 +47,7 @@ func (g *GitHub) FetchCommitInfo(ctx context.Context, kubeManifests GitHubRepo, 
 	// Create a subspan for JSON unmarshaling
 	var info ExporterInfo
 	{
-		_, unmarshalSpan := tracer.Start(ctx, "github.unmarshal_exporter_info")
+		_, unmarshalSpan := tracer.Start(ctx, "kube_manifests.exporter.info.unmarshal")
 		defer unmarshalSpan.End()
 
 		if err := json.Unmarshal(data, &info); err != nil {
@@ -55,10 +58,6 @@ func (g *GitHub) FetchCommitInfo(ctx context.Context, kubeManifests GitHubRepo, 
 			span.SetStatus(codes.Error, "Failed to parse exporter info")
 			return ExporterInfo{}, fmt.Errorf("parsing exporter-info: %w", err)
 		}
-	}
-
-	if len(info.CommitsSinceLastExport) > 0 {
-		span.SetAttributes(attribute.Int("github.commits_count", len(info.CommitsSinceLastExport)))
 	}
 
 	span.SetStatus(codes.Ok, "Successfully fetched commit info")

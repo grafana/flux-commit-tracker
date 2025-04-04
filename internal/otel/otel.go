@@ -4,14 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
-	internallogger "github.com/grafana/flux-commit-tracker/internal/logger"
+	otelslogtracehandler "github.com/go-slog/otelslog"
+	"github.com/grafana/flux-commit-tracker/internal/logger"
+	slogmulti "github.com/samber/slog-multi"
+	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
-	"go.opentelemetry.io/otel/exporters/stdout/stdoutlog"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/log/global"
@@ -23,22 +26,52 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
 )
 
-// ExporterType defines the type of exporter to use
-type ExporterType string
+type shutdownFunc = func(context.Context) error
+
+// TelemetryMode defines the operational mode for telemetry.
+type TelemetryMode string
 
 const (
-	// StdoutExporter outputs telemetry to stdout (for development)
-	StdoutExporter ExporterType = "stdout"
-	// OTLPExporter sends telemetry to an OTLP-compatible collector
-	OTLPExporter ExporterType = "otlp"
+	// ModeStdoutLogs prints logs to stdout using tint (if TTY) or JSON (if not
+	// TTY), discards metrics/traces.
+	ModeStdoutLogs TelemetryMode = "stdout-logs"
+	// ModeStdoutAll prints logs to stdout as per `ModeStdoutLogs`, but also
+	// exports metrics/traces to stdout.
+	ModeStdoutAll TelemetryMode = "stdout-all"
+	// ModeOTLP exports all signals via OTLP.
+	ModeOTLP TelemetryMode = "otlp"
+	// ModeStdoutLogsOTLP prints logs to stdout as per `ModeStdoutLogs`, but
+	// exports all signals via OTLP.
+	ModeStdoutLogsOTLP TelemetryMode = "stdout-logs+otlp"
+	// ModeStdoutAllOTLP prints logs/exports to stdout as per `ModeStdoutAll`, but
+	// exports all signals via OTLP.
+	ModeStdoutAllOTLP TelemetryMode = "stdout-all+otlp"
 )
+
+// IncludesOTLP returns true if signals should be exported via OTLP.
+func (m TelemetryMode) IncludesOTLP() bool {
+	return m == ModeOTLP || m == ModeStdoutLogsOTLP || m == ModeStdoutAllOTLP
+}
+
+// IncludesStdoutLogs returns true if logs should be printed to stdout.
+func (m TelemetryMode) IncludesStdoutLogs() bool {
+	return m == ModeStdoutLogs || m == ModeStdoutLogsOTLP || m == ModeStdoutAll || m == ModeStdoutAllOTLP
+}
+
+// IncludesVerbose returns true if signals should be printed to stdout.
+func (m TelemetryMode) IncludesVerbose() bool {
+	return m == ModeStdoutAll || m == ModeStdoutAllOTLP
+}
 
 // Config holds configuration for OpenTelemetry setup
 type Config struct {
 	// ServiceName is the name of the service in OpenTelemetry
 	ServiceName string
-	// ExporterType determines the format of telemetry output
-	ExporterType ExporterType
+	// ServiceNamespace is the namespace of the service in OpenTelemetry. This
+	// will be a prefix on exported metric names.
+	ServiceNamespace string
+	// Mode determines how telemetry signals are processed and exported.
+	Mode TelemetryMode
 	// OTLPEndpoint is the endpoint for OTLP exporters (e.g., "localhost:4317")
 	OTLPEndpoint string
 	// UseInsecure determines whether to use TLS with OTLP exporters
@@ -49,9 +82,218 @@ type Config struct {
 	MetricInterval time.Duration
 }
 
-// SetupTelemetry initializes OpenTelemetry with the provided configuration
-// It returns a logger, a shutdown function, and any error that occurred
-func SetupTelemetry(ctx context.Context, config Config) (internallogger.Logger, func(context.Context) error, error) {
+func callShutdownFuncs(ctx context.Context, funcs []shutdownFunc) error {
+	var err error
+	for _, fn := range funcs {
+		err = errors.Join(err, fn(ctx))
+	}
+
+	return err
+}
+
+// newTracerProvider creates a TracerProvider based on the mode.
+// Returns the provider, its shutdown function, and any error.
+// Returns nil provider if tracing is disabled for the mode.
+func newTracerProvider(ctx context.Context, config Config, baseHandler slog.Handler, res *resource.Resource) (*sdktrace.TracerProvider, func(context.Context) error, error) {
+	if config.Mode == ModeStdoutLogs {
+		return nil, nil, nil
+	}
+
+	if !config.Mode.IncludesVerbose() && !config.Mode.IncludesOTLP() {
+		return nil, nil, nil
+	}
+
+	var exporters []sdktrace.SpanExporter
+	var exporterShutdownFuncs []shutdownFunc
+	sampler := sdktrace.AlwaysSample()
+
+	if config.Mode.IncludesOTLP() {
+		opts := []otlptracegrpc.Option{
+			otlptracegrpc.WithEndpoint(config.OTLPEndpoint),
+		}
+		if config.UseInsecure {
+			opts = append(opts, otlptracegrpc.WithInsecure())
+		}
+		exporter, err := otlptracegrpc.New(ctx, opts...)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create OTLP trace exporter: %w", err)
+		}
+
+		exporters = append(exporters, exporter)
+		exporterShutdownFuncs = append(exporterShutdownFuncs, exporter.Shutdown)
+	}
+
+	// In verbose mode, print traces to stdout.
+	if config.Mode.IncludesVerbose() {
+		slogWriter := logger.NewSlogWriter(ctx, baseHandler, "", logger.LevelTrace)
+		exporter, err := stdouttrace.New(
+			stdouttrace.WithWriter(slogWriter),
+			stdouttrace.WithPrettyPrint(),
+			stdouttrace.WithoutTimestamps(),
+		)
+		if err != nil {
+			shutdownErr := callShutdownFuncs(ctx, exporterShutdownFuncs)
+			return nil, nil, errors.Join(fmt.Errorf("failed to create stdout trace exporter: %w", err), shutdownErr)
+		}
+
+		exporters = append(exporters, exporter)
+	}
+
+	traceProviderOptions := make([]sdktrace.TracerProviderOption, 0, len(exporters)+2)
+	traceProviderOptions = append(traceProviderOptions,
+		sdktrace.WithSampler(sampler),
+		sdktrace.WithResource(res),
+	)
+
+	batchSpanProcessorShutdownFuncs := make([]shutdownFunc, 0, len(exporters))
+	for _, exporter := range exporters {
+		bsp := sdktrace.NewBatchSpanProcessor(exporter)
+		traceProviderOptions = append(traceProviderOptions, sdktrace.WithSpanProcessor(bsp))
+		batchSpanProcessorShutdownFuncs = append(batchSpanProcessorShutdownFuncs, bsp.Shutdown)
+	}
+
+	tracerProvider := sdktrace.NewTracerProvider(traceProviderOptions...)
+
+	shutdown := func(ctx context.Context) error {
+		bspErr := callShutdownFuncs(ctx, batchSpanProcessorShutdownFuncs)
+		exporterErr := callShutdownFuncs(ctx, exporterShutdownFuncs)
+		return errors.Join(bspErr, exporterErr)
+	}
+
+	return tracerProvider, shutdown, nil
+}
+
+// newMeterProvider creates a MeterProvider based on the mode.
+// Returns the provider, its shutdown function, and any error.
+// Returns nil provider if metrics are disabled for the mode.
+func newMeterProvider(ctx context.Context, config Config, baseHandler slog.Handler, res *resource.Resource) (*sdkmetric.MeterProvider, func(context.Context) error, error) {
+	if config.Mode == ModeStdoutLogs {
+		return nil, nil, nil
+	}
+
+	if !config.Mode.IncludesVerbose() && !config.Mode.IncludesOTLP() {
+		return nil, nil, nil
+	}
+
+	meterProviderOptions := []sdkmetric.Option{sdkmetric.WithResource(res)}
+	exporterShutdownFuncs := []shutdownFunc{}
+
+	if config.Mode.IncludesOTLP() {
+		opts := []otlpmetricgrpc.Option{
+			otlpmetricgrpc.WithEndpoint(config.OTLPEndpoint),
+		}
+
+		if config.UseInsecure {
+			opts = append(opts, otlpmetricgrpc.WithInsecure())
+		}
+
+		exporter, err := otlpmetricgrpc.New(ctx, opts...)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create OTLP metric exporter: %w", err)
+		}
+
+		reader := sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(config.MetricInterval))
+		meterProviderOptions = append(meterProviderOptions, sdkmetric.WithReader(reader))
+		exporterShutdownFuncs = append(exporterShutdownFuncs, exporter.Shutdown)
+	}
+
+	// In verbose mode, print metrics to stdout.
+	if config.Mode.IncludesVerbose() {
+		slogWriter := logger.NewSlogWriter(ctx, baseHandler, "", logger.LevelTrace)
+		exporter, err := stdoutmetric.New(
+			stdoutmetric.WithWriter(slogWriter),
+			stdoutmetric.WithPrettyPrint(),
+			stdoutmetric.WithoutTimestamps(),
+		)
+		if err != nil {
+			shutdownErr := callShutdownFuncs(ctx, exporterShutdownFuncs)
+			return nil, nil, errors.Join(fmt.Errorf("failed to create stdout metric exporter: %w", err), shutdownErr)
+		}
+		reader := sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(config.MetricInterval))
+		meterProviderOptions = append(meterProviderOptions, sdkmetric.WithReader(reader))
+	}
+
+	meterProvider := sdkmetric.NewMeterProvider(meterProviderOptions...)
+
+	shutdown := func(shutdownCtx context.Context) error {
+		providerErr := meterProvider.Shutdown(shutdownCtx)
+		exporterErr := callShutdownFuncs(shutdownCtx, exporterShutdownFuncs)
+		return errors.Join(providerErr, exporterErr)
+	}
+
+	return meterProvider, shutdown, nil
+}
+
+// newOTLPLogProcessor creates an OTLP log processor if the mode requires it.
+// Returns the processor, its shutdown function, and any error.
+func newOTLPLogProcessor(ctx context.Context, config Config) (sdklog.Processor, func(context.Context) error, error) {
+	if !config.Mode.IncludesOTLP() {
+		return nil, nil, nil
+	}
+
+	opts := []otlploggrpc.Option{
+		otlploggrpc.WithEndpoint(config.OTLPEndpoint),
+	}
+	if config.UseInsecure {
+		opts = append(opts, otlploggrpc.WithInsecure())
+	}
+	otlpExporter, err := otlploggrpc.New(ctx, opts...)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create OTLP log exporter: %w", err)
+	}
+
+	processor := sdklog.NewBatchProcessor(otlpExporter)
+	shutdown := otlpExporter.Shutdown
+
+	return processor, shutdown, nil
+}
+
+// setupLoggingHandler configures the logging handler based on the telemetry mode.
+// It determines if logs should go to OTLP, stdout, or both, and sets up the
+// necessary providers and handlers.
+// Returns the final slog.Handler, a slice of shutdown functions specific to logging,
+// and any error that occurred.
+func setupLoggingHandler(ctx context.Context, config Config, baseHandler slog.Handler, res *resource.Resource) (slog.Handler, []shutdownFunc, error) {
+	finalHandler := baseHandler
+	var loggingShutdownFuncs []shutdownFunc
+
+	otlpLogProcessor, otlpLogShutdown, err := newOTLPLogProcessor(ctx, config)
+	if err != nil {
+		return nil, nil, err // Error already wrapped in newOTLPLogProcessor
+	}
+
+	if otlpLogProcessor != nil {
+		loggerProvider := sdklog.NewLoggerProvider(
+			sdklog.WithResource(res),
+			sdklog.WithProcessor(otlpLogProcessor),
+		)
+
+		loggingShutdownFuncs = append(loggingShutdownFuncs, loggerProvider.Shutdown, otlpLogShutdown)
+		global.SetLoggerProvider(loggerProvider)
+
+		// Create a handler that sends logs to the global OTLP provider
+		otelBridgeHandler := otelslog.NewHandler(config.ServiceName)
+
+		if config.Mode.IncludesStdoutLogs() {
+			// Combine base and OTLP handlers using slogmulti. This means that logs
+			// written using `logger` will be sent to both the base handler (stdout) and
+			// the OTLP handler.
+			finalHandler = slogmulti.Fanout(baseHandler, otelBridgeHandler)
+			// Automatically add trace and span IDs to log messages, if slog's
+			// `*Context` methods are used
+			finalHandler = otelslogtracehandler.NewHandler(finalHandler)
+		} else {
+			// If not logging to stdout, just use the OTLP bridge
+			finalHandler = otelBridgeHandler
+		}
+	}
+
+	return finalHandler, loggingShutdownFuncs, nil
+}
+
+// SetupTelemetry initializes OpenTelemetry with the provided configuration and base handler.
+// It returns a configured slog Logger, a shutdown function, and any error that occurred.
+func SetupTelemetry(ctx context.Context, config Config, baseHandler slog.Handler) (*slog.Logger, func(context.Context) error, error) {
 	if config.BatchTimeout == 0 {
 		config.BatchTimeout = 5 * time.Second
 	}
@@ -60,30 +302,30 @@ func SetupTelemetry(ctx context.Context, config Config) (internallogger.Logger, 
 		config.MetricInterval = 30 * time.Second
 	}
 
-	var shutdownFuncs []func(context.Context) error
-
-	// Create a shutdown function that calls all registered shutdown functions
+	var allShutdownFuncs []shutdownFunc
 	shutdown := func(ctx context.Context) error {
 		var err error
-		for _, fn := range shutdownFuncs {
-			err = errors.Join(err, fn(ctx))
+		for _, shutdownFunc := range allShutdownFuncs {
+			err = errors.Join(err, shutdownFunc(ctx))
 		}
 		return err
 	}
 
-	// Handle errors by attempting to clean up what's been set up so far
-	handleErr := func(inErr error) (internallogger.Logger, func(context.Context) error, error) {
+	logHandler := baseHandler
+	handleErr := func(inErr error) (*slog.Logger, func(context.Context) error, error) {
 		shutdownErr := shutdown(ctx)
-		if shutdownErr != nil {
-			return internallogger.Logger{}, nil, errors.Join(inErr, fmt.Errorf("shutdown error: %v", shutdownErr))
+		finalErr := errors.Join(inErr, shutdownErr)
+		if finalErr != nil {
+			// Use default logger here as our configured one might have failed
+			slog.New(logHandler).Error("Telemetry setup failed", "error", finalErr)
 		}
-		return internallogger.Logger{}, nil, inErr
+		return nil, shutdown, finalErr
 	}
 
-	// Create resource with service attributes
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
 			semconv.ServiceName(config.ServiceName),
+			semconv.ServiceNamespace(config.ServiceNamespace),
 		),
 		resource.WithProcessRuntimeDescription(),
 		resource.WithProcessRuntimeVersion(),
@@ -95,159 +337,43 @@ func SetupTelemetry(ctx context.Context, config Config) (internallogger.Logger, 
 		return handleErr(fmt.Errorf("failed to create resource: %w", err))
 	}
 
-	// Set up propagator
 	prop := propagation.NewCompositeTextMapPropagator(
 		propagation.TraceContext{},
 		propagation.Baggage{},
 	)
 	otel.SetTextMapPropagator(prop)
 
-	// Create logger
-	logger := internallogger.NewLogger(config.ServiceName)
-
-	// Set up logger provider
-	loggerProvider, err := newLoggerProvider(ctx, config, res)
+	// Setup logging first
+	finalHandler, loggingShutdownFuncs, err := setupLoggingHandler(ctx, config, baseHandler, res)
 	if err != nil {
-		return handleErr(err)
+		return handleErr(err) // Error already wrapped in setupLoggingHandler
 	}
-	shutdownFuncs = append(shutdownFuncs, loggerProvider.Shutdown)
-	global.SetLoggerProvider(loggerProvider)
+	allShutdownFuncs = append(allShutdownFuncs, loggingShutdownFuncs...)
 
-	// Set up tracer provider
-	tracerProvider, err := newTracerProvider(ctx, config, res)
-	if err != nil {
-		return handleErr(err)
-	}
-	shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
-	otel.SetTracerProvider(tracerProvider)
+	// Create the primary logger instance using the potentially wrapped handler
+	logHandler = finalHandler
+	logger := slog.New(logHandler)
 
-	// Set up meter provider
-	meterReader, err := newMeterReader(ctx, config)
+	// Pass the *original* baseHandler to tracer/meter providers for stdout export
+	tracerProvider, traceShutdown, err := newTracerProvider(ctx, config, baseHandler, res)
 	if err != nil {
 		return handleErr(err)
 	}
 
-	meterProvider := sdkmetric.NewMeterProvider(
-		sdkmetric.WithReader(meterReader),
-		sdkmetric.WithResource(res),
-	)
-	shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
-	otel.SetMeterProvider(meterProvider)
+	if tracerProvider != nil {
+		allShutdownFuncs = append(allShutdownFuncs, traceShutdown)
+		otel.SetTracerProvider(tracerProvider)
+	}
+
+	meterProvider, meterShutdown, err := newMeterProvider(ctx, config, baseHandler, res)
+	if err != nil {
+		return handleErr(err)
+	}
+
+	if meterProvider != nil {
+		allShutdownFuncs = append(allShutdownFuncs, meterShutdown)
+		otel.SetMeterProvider(meterProvider)
+	}
 
 	return logger, shutdown, nil
-}
-
-// Helper functions
-
-func newTracerProvider(ctx context.Context, config Config, res *resource.Resource) (*sdktrace.TracerProvider, error) {
-	var traceExporter sdktrace.SpanExporter
-	var sampler sdktrace.Sampler
-
-	switch config.ExporterType {
-	case OTLPExporter:
-		opts := []otlptracegrpc.Option{
-			otlptracegrpc.WithEndpoint(config.OTLPEndpoint),
-		}
-
-		if config.UseInsecure {
-			opts = append(opts, otlptracegrpc.WithInsecure())
-		}
-
-		exporter, err := otlptracegrpc.New(ctx, opts...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create OTLP trace exporter: %w", err)
-		}
-
-		traceExporter = exporter
-		sampler = sdktrace.TraceIDRatioBased(0.5)
-
-	case StdoutExporter:
-		exporter, err := stdouttrace.New(stdouttrace.WithPrettyPrint())
-		if err != nil {
-			return nil, fmt.Errorf("failed to create stdout trace exporter: %w", err)
-		}
-
-		traceExporter = exporter
-		sampler = sdktrace.AlwaysSample()
-
-	default:
-		return nil, fmt.Errorf("unsupported exporter type: %s", config.ExporterType)
-	}
-
-	tracerProvider := sdktrace.NewTracerProvider(
-		sdktrace.WithSampler(sampler),
-		sdktrace.WithBatcher(traceExporter, sdktrace.WithBatchTimeout(config.BatchTimeout)),
-		sdktrace.WithResource(res),
-	)
-
-	return tracerProvider, nil
-}
-
-func newMeterReader(ctx context.Context, config Config) (sdkmetric.Reader, error) {
-	switch config.ExporterType {
-	case OTLPExporter:
-		opts := []otlpmetricgrpc.Option{
-			otlpmetricgrpc.WithEndpoint(config.OTLPEndpoint),
-		}
-
-		if config.UseInsecure {
-			opts = append(opts, otlpmetricgrpc.WithInsecure())
-		}
-
-		exporter, err := otlpmetricgrpc.New(ctx, opts...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create OTLP metric exporter: %w", err)
-		}
-
-		return sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(config.MetricInterval)), nil
-
-	case StdoutExporter:
-		exporter, err := stdoutmetric.New()
-		if err != nil {
-			return nil, fmt.Errorf("failed to create stdout metric exporter: %w", err)
-		}
-		return sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(config.MetricInterval)), nil
-
-	default:
-		return nil, fmt.Errorf("unsupported exporter type: %s", config.ExporterType)
-	}
-}
-
-func newLoggerProvider(ctx context.Context, config Config, res *resource.Resource) (*sdklog.LoggerProvider, error) {
-	var logProcessor sdklog.Processor
-
-	switch config.ExporterType {
-	case OTLPExporter:
-		opts := []otlploggrpc.Option{
-			otlploggrpc.WithEndpoint(config.OTLPEndpoint),
-		}
-
-		if config.UseInsecure {
-			opts = append(opts, otlploggrpc.WithInsecure())
-		}
-
-		exporter, err := otlploggrpc.New(ctx, opts...)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create OTLP log exporter: %w", err)
-		}
-
-		logProcessor = sdklog.NewBatchProcessor(exporter)
-
-	case StdoutExporter:
-		exporter, err := stdoutlog.New()
-		if err != nil {
-			return nil, fmt.Errorf("failed to create stdout log exporter: %w", err)
-		}
-		logProcessor = sdklog.NewBatchProcessor(exporter)
-
-	default:
-		return nil, fmt.Errorf("unsupported exporter type: %s", config.ExporterType)
-	}
-
-	loggerProvider := sdklog.NewLoggerProvider(
-		sdklog.WithProcessor(logProcessor),
-		sdklog.WithResource(res),
-	)
-
-	return loggerProvider, nil
 }
