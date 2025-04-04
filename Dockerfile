@@ -1,4 +1,4 @@
-FROM --platform=${BUILDPLATFORM} golang:1.24.1-alpine3.21 AS builder
+FROM --platform=${BUILDPLATFORM} golang:1.24.2-alpine3.21 AS builder
 
 WORKDIR /app
 
@@ -11,12 +11,12 @@ RUN --mount=target=. \
     go build \
       -trimpath \
       -ldflags="-s -w" \
-      -o /usr/bin/kme-notification-controller \
+      -o /usr/bin/flux-commit-tracker \
       ./cmd/main.go
 
 FROM scratch
 
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-COPY --from=builder /usr/bin/kme-notification-controller /usr/bin/kme-notification-controller
+COPY --from=builder /usr/bin/flux-commit-tracker /usr/bin/flux-commit-tracker
 
-ENTRYPOINT ["/usr/bin/kme-notification-controller"]
+ENTRYPOINT ["/usr/bin/flux-commit-tracker"]
