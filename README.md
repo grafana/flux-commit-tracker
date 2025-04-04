@@ -38,7 +38,7 @@ understand what we're measuring here.
    detects the change. Each cluster's flux is configured to watch for changes in
    its own directory. It looks at the commit to determine if it needs to do
    anything, and acts accordingly.
-****
+
 When Flux finds a new commit in `kube-manifests`, it updates the
 `status.lastAppliedRevision` of its `Kustomization` objects. This creates an
 event in the cluster which we hook into here. We can see the commits as Flux
@@ -144,13 +144,50 @@ with the default Docker Compose setup).
 Remember to use the appropriate auth method (Token/App) and K8s config
 method (flag/in-cluster). See `--help` for all options.
 
+### Running from a Docker image
+
+We push a Docker image to the GitHub Container Registry:
+
+```bash
+docker run --rm \
+  -e GITHUB_TOKEN=$(gh auth token) \
+  ghcr.io/grafana/flux-commit-tracker:latest \
+  --log-level=debug
+```
+
+Semver-tagged images will be available for any releases once we have them, as is
+`main` for the latest commit on the `main` branch.
+
+These docker images are attested using [GitHub Artifact Attestations][attest].
+You can verify our container images by using the `gh` CLI:
+
+```console
+$ gh attestation verify --repo grafana/flux-commit-tracker oci://ghcr.io/grafana/flux-commit-tracker:<tag>
+Loaded digest sha256:... for oci://ghcr.io/grafana/flux-commit-tracker:<sometag>
+Loaded 3 attestations from GitHub API
+✓ Verification succeeded!
+
+sha256:<sometag> was attested by:
+REPO                                PREDICATE_TYPE                  WORKFLOW
+grafana/flux-commit-tracker         https://slsa.dev/provenance/v1  .github/workflows/build.yml@<somref>
+```
+
+Attestations can also be viewed on the [attestation page] of this repository.
+
+What this lets you do is trace a container image back to a build in this
+repository. You'll still need to verify the build steps that were used to build
+the image to ensure that the image is safe to use.
+
+[attest]: https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds
+[attestation page]: https://github.com/grafana/flux-commit-tracker/attestations
+
 ## TODO
 
 - [x] Add more tests
 - [x] Use better log levels (debug) for some messages (Now configurable via `--log-level`)
 - [x] Make the output in `stdout` mode sanely readable (Implemented
       `stdout-logs` and `stdout-all` modes)
-- [ ] Add Dockerfile and GitHub action to build and push this
+- [x] Add Dockerfile and GitHub action to build and push this
 - [ ] Run in dev and push to the `alloy-otlp` environment
 - [ ] Set up all the normal repo stuff (branch protection, required reviews, CI,
       Dependabot etc) and make it public
