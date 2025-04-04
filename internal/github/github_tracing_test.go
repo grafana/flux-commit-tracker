@@ -60,7 +60,7 @@ func TestTraceInstrumentation(t *testing.T) {
 
 	span.End()
 
-	getFileSpan := testTel.FindSpan(ctx, "github.get_file")
+	getFileSpan := testTel.FindSpan(t, ctx, "github.get_file")
 	require.NotNil(t, getFileSpan, "Could not find the 'github.get_file' span")
 
 	expectedAttrs := []attribute.KeyValue{
@@ -97,7 +97,7 @@ func TestTraceInstrumentationWithError(t *testing.T) {
 	repoNotFoundError := RepositoryNotFoundError{}
 	require.ErrorAs(t, err, &repoNotFoundError)
 
-	getFileSpan := testTel.FindSpan(ctx, "github.get_file")
+	getFileSpan := testTel.FindSpan(t, ctx, "github.get_file")
 	require.NotNil(t, getFileSpan, "Could not find the 'github.get_file' span")
 
 	otel.AssertSpanStatus(t, getFileSpan, codes.Error)
