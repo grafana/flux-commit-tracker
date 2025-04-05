@@ -1,7 +1,7 @@
 services:
   # Grafana for visualization
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:latest@sha256:62d2b9d20a19714ebfe48d1bb405086081bc602aa053e28cf6d73c7537640dfb
     pull_policy: always
     ports:
       - 3000:3000 # UI
@@ -21,7 +21,7 @@ services:
 
   # Tempo for trace visualization
   tempo:
-    image: grafana/tempo:latest
+    image: grafana/tempo:latest@sha256:bf37fdbae53ceeaddb160ec5a1437a75ee5fca8211d2fe53c16449effb666226
     pull_policy: always
     command:
       - -config.file=/etc/tempo/tempo.yaml
@@ -33,7 +33,7 @@ services:
 
   # Loki for log aggregation
   loki:
-    image: grafana/loki:latest
+    image: grafana/loki:latest@sha256:5fe9fa99e9a747297cdf0239a5b25d192d8f668bd6505b09beef4dffcab5aac2
     pull_policy: always
     command:
       - -config.file=/etc/loki/loki.yaml
@@ -45,7 +45,7 @@ services:
 
   # Mimir for metrics (replacing Prometheus)
   mimir:
-    image: grafana/mimir:latest
+    image: grafana/mimir:latest@sha256:f5850c2fd0d872fc029378558765aa79c4be66a5fca0d8c6bf0fc30971484555
     pull_policy: always
     command:
       - -config.file=/etc/mimir/mimir.yaml
@@ -57,7 +57,7 @@ services:
 
   # Grafana Alloy for telemetry collection (replacing OpenTelemetry Collector)
   alloy:
-    image: grafana/alloy:latest
+    image: grafana/alloy:latest@sha256:b92703c13c32c20d629ffd89f40287ed385c12a335a7c9f31c720a5f912f9d6f
     pull_policy: always
     command:
      - run
