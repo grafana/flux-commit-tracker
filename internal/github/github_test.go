@@ -67,12 +67,14 @@ func TestNewGitHubClientWithAppAuthentication(t *testing.T) {
 
 	ctx := t.Context()
 
+	privateKey := byteSlice([]byte("-----BEGIN RSA PRIVATE KEY-----\nMC0CAQACBQD7J5Q9AgMBAAECBB6C8NkCAwD+JwIDAPz7AgMA1xcCAkoZAgMAwE8=\n-----END RSA PRIVATE KEY-----"))
+
 	// Set up test data
 	appAuth := AppAuth{
 		GithubAppInstallationID: 123,
 		GithubAppID:             456,
 		// generate this with: openssl genrsa 32 2>/dev/null | awk 1 ORS='\\n'
-		GithubAppPrivateKey: []byte("-----BEGIN RSA PRIVATE KEY-----\nMC0CAQACBQD7J5Q9AgMBAAECBB6C8NkCAwD+JwIDAPz7AgMA1xcCAkoZAgMAwE8=\n-----END RSA PRIVATE KEY-----"),
+		GithubAppPrivateKey: &privateKey,
 	}
 
 	githubClient, err := NewGitHubClient(ctx, logger, TokenAuth{}, appAuth)

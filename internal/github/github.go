@@ -27,9 +27,7 @@ const (
 	OtelName = "github.com/grafana/flux-commit-tracker/internal/github"
 )
 
-var (
-	tracer = otel.Tracer(OtelName)
-)
+var tracer = otel.Tracer(OtelName)
 
 // Client defines the interface for interacting with GitHub.
 type Client interface {
@@ -42,10 +40,23 @@ type TokenAuth struct {
 	GithubToken string `env:"GITHUB_TOKEN" hidden:"" help:"GitHub personal access token" xor:"token"`
 }
 
+// byteSlice is an alias for []byte which parses a string. It's used because
+// `kong` expects uints by default
+type byteSlice []byte
+
+func (b *byteSlice) UnmarshalText(value []byte) error {
+	*b = value
+	return nil
+}
+
+func (b *byteSlice) String() string {
+	return string(*b)
+}
+
 type AppAuth struct {
-	GithubAppID             int64  `env:"GITHUB_APP_ID" hidden:"" help:"GitHub App ID" and:"app" xor:"token"`
-	GithubAppPrivateKey     []byte `env:"GITHUB_APP_PRIVATE_KEY" hidden:"" help:"GitHub App private key" and:"app"`
-	GithubAppInstallationID int64  `env:"GITHUB_APP_INSTALLATION_ID" hidden:"" help:"GitHub App installation ID" and:"app"`
+	GithubAppID             int64      `env:"GITHUB_APP_ID" hidden:"" help:"GitHub App ID" and:"app" xor:"token"`
+	GithubAppPrivateKey     *byteSlice `env:"GITHUB_APP_PRIVATE_KEY" hidden:"" help:"GitHub App private key" and:"app"`
+	GithubAppInstallationID int64      `env:"GITHUB_APP_INSTALLATION_ID" hidden:"" help:"GitHub App installation ID" and:"app"`
 }
 
 type GitHubRepo struct {
@@ -143,7 +154,7 @@ func NewGitHubClient(ctx context.Context, logger *slog.Logger, tokenAuth TokenAu
 
 	// Otherwise, use the App authentication flow
 	logger.Debug("Using GitHub App for authentication")
-	return authenticateWithApp(logger, appAuth.GithubAppID, appAuth.GithubAppInstallationID, appAuth.GithubAppPrivateKey)
+	return authenticateWithApp(logger, appAuth.GithubAppID, appAuth.GithubAppInstallationID, *appAuth.GithubAppPrivateKey)
 }
 
 func (g *gitHubClient) GetFile(ctx context.Context, logger *slog.Logger, repo GitHubRepo, path, ref string) ([]byte, error) {
