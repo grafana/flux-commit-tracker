@@ -24,32 +24,34 @@ import (
 )
 
 const (
-	// OtelName is the name used for OpenTelemetry instrumentation.
-	OtelName = "github.com/grafana/flux-commit-tracker"
-
-	// OtelNamespace is the namespace used for OpenTelemetry metrics. It's a
-	// prefix on all metric names.
-	OtelNamespace = "flux_commit_tracker"
+	// A prefix applied to all metric names
+	Prefix = "flux-commit-tracker"
 
 	// Metric names
-	MetricE2EExportTime                   = OtelNamespace + ".e2e.export-time"
-	MetricKubeManifestsExporterExportTime = OtelNamespace + ".kube-manifests-exporter.export-time"
-	MetricFluxReconcileTime               = OtelNamespace + ".flux.reconcile-time"
+	MetricE2EExportTime                   = Prefix + ".e2e.export-time"
+	MetricKubeManifestsExporterExportTime = Prefix + ".kube-manifests-exporter.export-time"
+	MetricFluxReconcileTime               = Prefix + ".flux.reconcile-time"
+
+	InstrumentationScope = "tracker"
 )
 
 var (
 	// otel globals
-	tracer = otel.Tracer(OtelName)
-	meter  = otel.Meter(OtelName)
+	tracer = otel.Tracer(InstrumentationScope)
+	meter  = otel.Meter(InstrumentationScope)
 
 	// metrics
 	exportTime                      metric.Float64Histogram
 	kubeManifestsExporterExportTime metric.Float64Histogram
 	fluxReconcileTime               metric.Float64Histogram
 
-	// Buckets in seconds: 15s, 30s, 1m, 2m, 3m, 5m, 7m, 10m, 15m, 20m, 30m
-	metricBuckets = []float64{
-		15, 30, 60, 120, 180, 300, 420, 600, 900, 1200, 1800,
+	// attributes
+	attrControllerName = attribute.String("k8s.controller.name", "flux-commit-tracker")
+	attrResourceKind   = attribute.String("k8s.resource.kind", "Kustomization")
+
+	commonReconcileAttributes = []attribute.KeyValue{
+		attrControllerName,
+		attrResourceKind,
 	}
 )
 
@@ -60,7 +62,6 @@ func init() {
 		MetricE2EExportTime,
 		metric.WithDescription("Time taken from deployment-tools commit to flux apply"),
 		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(metricBuckets...),
 	)
 	if err != nil {
 		panic(fmt.Sprintf("failed to create exportTime histogram: %v", err))
@@ -70,7 +71,6 @@ func init() {
 		MetricKubeManifestsExporterExportTime,
 		metric.WithDescription("Time taken from deployment-tools commit to kube-manifests commit"),
 		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(metricBuckets...),
 	)
 	if err != nil {
 		panic(fmt.Sprintf("failed to create kubeManifestsExporterExportTime histogram: %v", err))
@@ -80,7 +80,6 @@ func init() {
 		MetricFluxReconcileTime,
 		metric.WithDescription("Time taken from kube-manifests commit to flux apply"),
 		metric.WithUnit("s"),
-		metric.WithExplicitBucketBoundaries(metricBuckets...),
 	)
 	if err != nil {
 		panic(fmt.Sprintf("failed to create fluxReconcileTime histogram: %v", err))
@@ -275,14 +274,15 @@ func (r *KustomizationReconciler) processDeploymentToolsCommits(
 func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Log.With("name", req.Name, "namespace", req.Namespace)
 
+	spanAttributes := append(
+		commonReconcileAttributes,
+		attribute.String("k8s.resource.name", req.Name),
+		attribute.String("k8s.namespace.name", req.Namespace),
+	)
+
 	ctx, span := tracer.Start(ctx, "reconcile",
 		trace.WithSpanKind(trace.SpanKindConsumer),
-		trace.WithAttributes(
-			attribute.String("k8s.controller.name", "flux-commit-tracker"),
-			attribute.String("k8s.kustomization.name", req.Name),
-			attribute.String("k8s.namespace.name", req.Namespace),
-			attribute.String("k8s.resource.kind", "Kustomization"),
-		),
+		trace.WithAttributes(spanAttributes...),
 	)
 	defer span.End()
 

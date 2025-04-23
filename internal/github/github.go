@@ -24,10 +24,10 @@ import (
 )
 
 const (
-	OtelName = "github.com/grafana/flux-commit-tracker/internal/github"
+	InstrumentationScope = "github"
 )
 
-var tracer = otel.Tracer(OtelName)
+var tracer = otel.Tracer(InstrumentationScope)
 
 // Client defines the interface for interacting with GitHub.
 type Client interface {

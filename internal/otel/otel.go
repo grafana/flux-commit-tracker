@@ -8,6 +8,7 @@ import (
 	"time"
 
 	otelslogtracehandler "github.com/go-slog/otelslog"
+	"github.com/grafana/flux-commit-tracker/internal/buildinfo"
 	"github.com/grafana/flux-commit-tracker/internal/logger"
 	slogmulti "github.com/samber/slog-multi"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
@@ -19,11 +20,12 @@ import (
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/sdk/instrumentation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/resource"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
+	semconv "go.opentelemetry.io/otel/semconv/v1.30.0"
 )
 
 type shutdownFunc = func(context.Context) error
@@ -65,11 +67,6 @@ func (m TelemetryMode) IncludesVerbose() bool {
 
 // Config holds configuration for OpenTelemetry setup
 type Config struct {
-	// ServiceName is the name of the service in OpenTelemetry
-	ServiceName string
-	// ServiceNamespace is the namespace of the service in OpenTelemetry. This
-	// will be a prefix on exported metric names.
-	ServiceNamespace string
 	// Mode determines how telemetry signals are processed and exported.
 	Mode TelemetryMode
 	// OTLPEndpoint is the endpoint for OTLP exporters (e.g., "localhost:4317")
@@ -147,7 +144,7 @@ func newTracerProvider(ctx context.Context, config Config, baseHandler slog.Hand
 
 	batchSpanProcessorShutdownFuncs := make([]shutdownFunc, 0, len(exporters))
 	for _, exporter := range exporters {
-		bsp := sdktrace.NewBatchSpanProcessor(exporter)
+		bsp := sdktrace.NewBatchSpanProcessor(exporter, sdktrace.WithBatchTimeout(config.BatchTimeout))
 		traceProviderOptions = append(traceProviderOptions, sdktrace.WithSpanProcessor(bsp))
 		batchSpanProcessorShutdownFuncs = append(batchSpanProcessorShutdownFuncs, bsp.Shutdown)
 	}
@@ -175,7 +172,23 @@ func newMeterProvider(ctx context.Context, config Config, baseHandler slog.Handl
 		return nil, nil, nil
 	}
 
-	meterProviderOptions := []sdkmetric.Option{sdkmetric.WithResource(res)}
+	view := sdkmetric.NewView(
+		sdkmetric.Instrument{
+			Kind: sdkmetric.InstrumentKindHistogram,
+			Scope: instrumentation.Scope{
+				Name: "tracker",
+			},
+		},
+		sdkmetric.Stream{
+			Aggregation: sdkmetric.AggregationBase2ExponentialHistogram{
+				MaxSize:  160,
+				MaxScale: 20,
+				NoMinMax: true,
+			},
+		},
+	)
+
+	meterProviderOptions := []sdkmetric.Option{sdkmetric.WithResource(res), sdkmetric.WithView(view)}
 	exporterShutdownFuncs := []shutdownFunc{}
 
 	if config.Mode.IncludesOTLP() {
@@ -272,7 +285,7 @@ func setupLoggingHandler(ctx context.Context, config Config, baseHandler slog.Ha
 		global.SetLoggerProvider(loggerProvider)
 
 		// Create a handler that sends logs to the global OTLP provider
-		otelBridgeHandler := otelslog.NewHandler(config.ServiceName)
+		otelBridgeHandler := otelslog.NewHandler("github.com/grafana/flux-commit-tracker")
 
 		if config.Mode.IncludesStdoutLogs() {
 			// Combine base and OTLP handlers using slogmulti. This means that logs
@@ -324,17 +337,27 @@ func SetupTelemetry(ctx context.Context, config Config, baseHandler slog.Handler
 
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
-			semconv.ServiceName(config.ServiceName),
-			semconv.ServiceNamespace(config.ServiceNamespace),
+
+			semconv.ServiceName("flux-commit-tracker"),
+			semconv.ServiceVersion(buildinfo.Version),
+			semconv.VCSRefHeadRevision(buildinfo.Commit),
+			semconv.VCSRefHeadName(buildinfo.Branch),
 		),
-		resource.WithProcessRuntimeDescription(),
-		resource.WithProcessRuntimeVersion(),
-		resource.WithProcessExecutableName(),
-		resource.WithProcessExecutablePath(),
-		resource.WithTelemetrySDK(),
+		resource.WithContainer(),
+		resource.WithHost(),
+		resource.WithProcess(),
+		resource.WithOS(),
 	)
 	if err != nil {
-		return handleErr(fmt.Errorf("failed to create resource: %w", err))
+		return handleErr(fmt.Errorf("failed to create initial resources: %w", err))
+	}
+
+	res, err = resource.Merge(
+		resource.Default(),
+		res,
+	)
+	if err != nil {
+		return handleErr(fmt.Errorf("failed to create merged resources: %w", err))
 	}
 
 	prop := propagation.NewCompositeTextMapPropagator(
