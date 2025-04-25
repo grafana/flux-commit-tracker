@@ -180,17 +180,3 @@ the image to ensure that the image is safe to use.
 
 [attest]: https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations/using-artifact-attestations-to-establish-provenance-for-builds
 [attestation page]: https://github.com/grafana/flux-commit-tracker/attestations
-
-## TODO
-
-- [x] Add more tests
-- [x] Use better log levels (debug) for some messages (Now configurable via `--log-level`)
-- [x] Make the output in `stdout` mode sanely readable (Implemented
-      `stdout-logs` and `stdout-all` modes)
-- [x] Add Dockerfile and GitHub action to build and push this
-- [x] Run in dev and push to the `alloy-otlp` environment
-- [x] Set up all the normal repo stuff (branch protection, required reviews, CI,
-      Dependabot etc) and make it public
-- [x] Verify the telemetry works
-- [x] Make OTLP local dev stuff work properly
-- [x] Switch to Grafana stack in the Docker compose file
