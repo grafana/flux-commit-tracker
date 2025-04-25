@@ -188,8 +188,8 @@ the image to ensure that the image is safe to use.
 - [x] Make the output in `stdout` mode sanely readable (Implemented
       `stdout-logs` and `stdout-all` modes)
 - [x] Add Dockerfile and GitHub action to build and push this
-- [ ] Run in dev and push to the `alloy-otlp` environment
-- [ ] Set up all the normal repo stuff (branch protection, required reviews, CI,
+- [x] Run in dev and push to the `alloy-otlp` environment
+- [x] Set up all the normal repo stuff (branch protection, required reviews, CI,
       Dependabot etc) and make it public
 - [x] Verify the telemetry works
 - [x] Make OTLP local dev stuff work properly
