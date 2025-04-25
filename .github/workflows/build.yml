@@ -42,6 +42,21 @@ jobs:
       digest: ${{ steps.build.outputs.digest }}
 
     steps:
+      - name: Calculate build variables
+        id: calculate-build-variables
+        run: |
+          # Version is hardcoded for now to 0.0.0
+          echo "version=0.0.0" | tee -a "${GITHUB_OUTPUT}"
+
+          # Fetch the commit and branch from the event
+          echo "commit=${GITHUB_SHA}" | tee -a "${GITHUB_OUTPUT}"
+
+          BRANCH="unknown"
+          if [ "${GITHUB_REF_TYPE}" = "branch" ]; then
+            BRANCH="${GITHUB_REF_NAME}"
+          fi
+          echo "branch=${BRANCH}" | tee -a "${GITHUB_OUTPUT}"
+
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -63,6 +78,10 @@ jobs:
         id: build
         uses: docker/build-push-action@14487ce63c7a62a4a324b0bfb37086795e31c6c1 # v6.16.0
         with:
+          build-args: |
+            VERSION=${{ steps.calculate-build-variables.outputs.version }}
+            COMMIT=${{ steps.calculate-build-variables.outputs.commit }}
+            BRANCH=${{ steps.calculate-build-variables.outputs.branch }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           outputs: type=image,"name=ghcr.io/grafana/flux-commit-tracker",push-by-digest=true,name-canonical=true
@@ -156,7 +175,7 @@ jobs:
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5.7.0
         with:
           images: ghcr.io/grafana/flux-commit-tracker
-          sep-tags: ' '
+          sep-tags: " "
           tags: |
             # tag with branch name for `main`
             type=ref,event=branch,enable={{is_default_branch}}
@@ -185,13 +204,13 @@ jobs:
         env:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
-            docker buildx imagetools inspect "ghcr.io/grafana/flux-commit-tracker:${VERSION}"
+          docker buildx imagetools inspect "ghcr.io/grafana/flux-commit-tracker:${VERSION}"
 
-            # Output image digest as github output
-            docker buildx imagetools inspect "ghcr.io/grafana/flux-commit-tracker:${VERSION}" --format "{{json .Manifest.Digest}}" | \
-              xargs | \
-              ( echo -n 'digest=' && cat ) | \
-              tee -a "${GITHUB_OUTPUT}"
+          # Output image digest as github output
+          docker buildx imagetools inspect "ghcr.io/grafana/flux-commit-tracker:${VERSION}" --format "{{json .Manifest.Digest}}" | \
+            xargs | \
+            ( echo -n 'digest=' && cat ) | \
+            tee -a "${GITHUB_OUTPUT}"
 
       - name: Generate build provenance attestation
         uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3

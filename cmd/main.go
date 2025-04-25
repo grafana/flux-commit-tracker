@@ -38,10 +38,8 @@ const (
 	FallbackNamespace = "default"
 )
 
-var (
-	// k8s controller
-	scheme = runtime.NewScheme()
-)
+// k8s controller
+var scheme = runtime.NewScheme()
 
 func init() {
 	// k8s controller initialisation
@@ -128,13 +126,11 @@ func (cli CLI) run(handler slog.Handler) error {
 	ctx := ctrl.SetupSignalHandler()
 
 	otelConfig := internalotel.Config{
-		ServiceName:      tracker.OtelName,
-		ServiceNamespace: tracker.OtelNamespace,
-		Mode:             cli.Telemetry.Mode,
-		OTLPEndpoint:     cli.Telemetry.Endpoint,
-		UseInsecure:      cli.Telemetry.Insecure,
-		BatchTimeout:     1 * time.Second,
-		MetricInterval:   15 * time.Second,
+		Mode:           cli.Telemetry.Mode,
+		OTLPEndpoint:   cli.Telemetry.Endpoint,
+		UseInsecure:    cli.Telemetry.Insecure,
+		BatchTimeout:   1 * time.Second,
+		MetricInterval: 15 * time.Second,
 	}
 
 	configuredSlogLogger, otelShutdown, err := internalotel.SetupTelemetry(ctx, otelConfig, handler)
