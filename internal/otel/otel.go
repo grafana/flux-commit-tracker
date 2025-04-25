@@ -8,6 +8,7 @@ import (
 	"time"
 
 	otelslogtracehandler "github.com/go-slog/otelslog"
+	"github.com/google/uuid"
 	"github.com/grafana/flux-commit-tracker/internal/buildinfo"
 	"github.com/grafana/flux-commit-tracker/internal/logger"
 	slogmulti "github.com/samber/slog-multi"
@@ -335,6 +336,10 @@ func SetupTelemetry(ctx context.Context, config Config, baseHandler slog.Handler
 		return nil, shutdown, finalErr
 	}
 
+	// Generate a random UUID for the service instance ID, so we get a different
+	// ID for each run.
+	uuid := uuid.NewString()
+
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
 
@@ -342,6 +347,7 @@ func SetupTelemetry(ctx context.Context, config Config, baseHandler slog.Handler
 			semconv.ServiceVersion(buildinfo.Version),
 			semconv.VCSRefHeadRevision(buildinfo.Commit),
 			semconv.VCSRefHeadName(buildinfo.Branch),
+			semconv.ServiceInstanceID(uuid),
 		),
 		resource.WithContainer(),
 		resource.WithHost(),
