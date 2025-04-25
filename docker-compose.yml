@@ -60,11 +60,11 @@ services:
     image: grafana/alloy:latest@sha256:8fad63014ac2d69dd5e21e51ec1639bb6f52b43402ff8ca96125ea874b7f6422
     pull_policy: always
     command:
-     - run
-     - /etc/alloy/config.alloy
-     - --storage.path=/tmp/alloy/data
-     - --server.http.listen-addr=0.0.0.0:8080
-     - --stability.level=experimental
+      - run
+      - /etc/alloy/config.river
+      - --storage.path=/tmp/alloy/data
+      - --server.http.listen-addr=0.0.0.0:8080
+      - --stability.level=experimental
     ports:
       - 4317:4317 # OTLP gRPC
       - 4318:4318 # OTLP HTTP
