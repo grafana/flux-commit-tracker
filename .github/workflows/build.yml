@@ -20,6 +20,9 @@ on:
 
   merge_group:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     permissions:
