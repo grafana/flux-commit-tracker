@@ -32,6 +32,10 @@ jobs:
     permissions:
       contents: read
       id-token: write
+
+    # Needs a secret - won't work from a fork.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+
     runs-on: ubuntu-latest
     timeout-minutes: 5
 
@@ -70,14 +74,12 @@ jobs:
           renovate-version: 39.252.0@sha256:f244c095f6f698e1ced593a8521dd2cc78d22beeaf4fb009450fbc977a2c5b36
           token: ${{ steps.generate-token.outputs.token }}
         env:
-          LOG_LEVEL:
-            ${{ github.event_name == 'pull_request' && 'debug' || 'info' }}
+          LOG_LEVEL: ${{ github.event_name == 'pull_request' && 'debug' || 'info' }}
           # For pull requests, this means we'll get the dependencies of the PR's
           # branch, so you can fix/change things and see the results in the PR's
           # run. By default, Renovate will clone the main/default branch.
-          RENOVATE_BASE_BRANCHES:
-            ${{ github.event_name == 'pull_request' &&
-            github.event.pull_request.head.ref || null }}
+          RENOVATE_BASE_BRANCHES: |
+            ${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || null }}
           # Dry run if the event is pull_request, or workflow_dispatch AND the dry-run input is true
           RENOVATE_DRY_RUN:
             ${{ (github.event_name == 'pull_request' || (github.event_name ==
