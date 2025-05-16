@@ -20,6 +20,16 @@ RUN --mount=target=. \
 
 FROM scratch
 
+COPY <<EOF /etc/group
+nogroup:x:65534:
+EOF
+
+COPY <<EOF /etc/passwd
+nobody:x:65534:65534:nobody:/nonexistent:/usr/sbin/nologin
+EOF
+
+USER nobody:nogroup
+
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=builder /usr/bin/flux-commit-tracker /usr/bin/flux-commit-tracker
 
