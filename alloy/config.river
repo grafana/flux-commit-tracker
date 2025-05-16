@@ -1,5 +1,5 @@
-# vim: set filetype=hcl shiftwidth=2 tabstop=2 expandtab:
-# It's not really a hcl file (it's a river file), but they are similar enough.
+// vim: set filetype=hcl shiftwidth=2 tabstop=2 expandtab:
+// It's not really a hcl file (it's a river file), but they are similar enough.
 logging {
   level  = "info"
   format = "logfmt"
