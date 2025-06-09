@@ -52,18 +52,39 @@ jobs:
 
       - name: Calculate build variables
         id: calculate-build-variables
-        run: |
-          # Version is hardcoded for now to 0.0.0
-          echo "version=0.0.0" | tee -a "${GITHUB_OUTPUT}"
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea # v7.0.1
+        with:
+          script: |
+            // Sanitise the ref name to be a valid Docker tag and SemVer
+            // pre-release identifier.
+            const sanitisedRef = context.ref
+              // Remove full ref prefixes. `refs/heads/foo/bar` becomes `foo/bar`.
+              .replace(/^refs\/(?:heads|tags|pull)\//, '')
 
-          # Fetch the commit and branch from the event
-          echo "commit=${GITHUB_SHA}" | tee -a "${GITHUB_OUTPUT}"
+              // Lowercase for consistency.
+              .toLowerCase()
 
-          BRANCH="unknown"
-          if [ "${GITHUB_REF_TYPE}" = "branch" ]; then
-            BRANCH="${GITHUB_REF_NAME}"
-          fi
-          echo "branch=${BRANCH}" | tee -a "${GITHUB_OUTPUT}"
+              // SemVer pre-release identifiers must start with a letter or number.
+              .replace(/[^a-z0-9.-]/g, '-')
+
+              // In SemVer pre-release identifiers, only single hyphens are allowed.
+              .replace(/-+/g, '-')
+
+              // Leading and trailing hyphens are not allowed
+              .replace(/^-|-$/g, '');
+
+            // TODO: Once https://github.com/actions/github-script/issues/566 is
+            // fixed and released, replace `proess.env.GITHUB_RUN_ATTEMPT` with
+            // `context.runAttempt`.
+            const version = `0.0.0-${sanitisedRef}.${context.runNumber}.${process.env.GITHUB_RUN_ATTEMPT}.${context.sha}`;
+
+            console.log(`Generated version: ${version}`);
+
+            core.setOutput('version', version);
+            core.setOutput('commit', context.sha);
+            core.setOutput('branch', context.ref_type === 'branch' ? context.ref_name : 'unknown');
+
+            return version;
 
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
