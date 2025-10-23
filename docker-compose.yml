@@ -45,7 +45,7 @@ services:
 
   # Mimir for metrics (replacing Prometheus)
   mimir:
-    image: grafana/mimir:latest@sha256:3e2a4293faa9ef6b7a291fc6eb64841b8c2eb0479c192716b9ca6420b5a34393
+    image: grafana/mimir:latest@sha256:5788fc30c5bafaf0f65ae6b15622cc02c7c14a76c3cdf09fc1781234612a7496
     pull_policy: always
     command:
       - -config.file=/etc/mimir/mimir.yaml
