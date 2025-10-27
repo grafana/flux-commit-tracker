@@ -57,7 +57,7 @@ services:
 
   # Grafana Alloy for telemetry collection (replacing OpenTelemetry Collector)
   alloy:
-    image: grafana/alloy:latest@sha256:8fad63014ac2d69dd5e21e51ec1639bb6f52b43402ff8ca96125ea874b7f6422
+    image: grafana/alloy:latest@sha256:8c7256f412feb9f5f48f9f6f9394dc97ca887f63dea9304f347970ecc1787669
     pull_policy: always
     command:
       - run
