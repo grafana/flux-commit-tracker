@@ -33,7 +33,7 @@ services:
 
   # Loki for log aggregation
   loki:
-    image: grafana/loki:latest@sha256:4c431d2e6b9b38718694b31c5d56be7c80dc69c513215fde1aeb5b02cd4e2665
+    image: grafana/loki:latest@sha256:0eaee7bf39cc83aaef46914fb58f287d4f4c4be6ec96b86c2ed55719a75e49c8
     pull_policy: always
     command:
       - -config.file=/etc/loki/loki.yaml
