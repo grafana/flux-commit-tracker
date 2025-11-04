@@ -149,7 +149,7 @@ jobs:
 
       - name: Generate SBOM
         if: github.event_name == 'push'
-        uses: anchore/sbom-action@9f7302141466aa6482940f15371237e9d9f4c34a # v0.19.0
+        uses: anchore/sbom-action@8e94d75ddd33f69f691467e42275782e4bfefe84 # v0.20.9
         with:
           format: cyclonedx-json
           image: ghcr.io/grafana/flux-commit-tracker@${{ steps.export-digests.outputs.digest }}
