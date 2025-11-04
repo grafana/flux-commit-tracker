@@ -21,7 +21,7 @@ services:
 
   # Tempo for trace visualization
   tempo:
-    image: grafana/tempo:latest@sha256:7f7e652a71962cf98b4d0c0770abe4dc92c96855a509a29e7a78601e5ae02797
+    image: grafana/tempo:latest@sha256:9dcd6f4f88b5a7ea45c66d532e8be9df2a4f46ab928448624e33eea509f24ec7
     pull_policy: always
     command:
       - -config.file=/etc/tempo/tempo.yaml
