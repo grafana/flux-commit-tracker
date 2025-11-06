@@ -2,7 +2,7 @@ module github.com/grafana/flux-commit-tracker
 
 go 1.24.4
 
-toolchain go1.24.10
+toolchain go1.25.3
 
 require (
 	github.com/alecthomas/kong v1.12.1
