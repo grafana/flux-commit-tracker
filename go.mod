@@ -4,7 +4,7 @@ go 1.24.1
 
 require (
 	github.com/alecthomas/kong v1.10.0
-	github.com/bradleyfalzon/ghinstallation/v2 v2.15.0
+	github.com/bradleyfalzon/ghinstallation/v2 v2.17.0
 	github.com/fluxcd/kustomize-controller/api v1.5.1
 	github.com/go-logr/logr v1.4.3
 	github.com/go-slog/otelslog v0.3.0
@@ -62,6 +62,7 @@ require (
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/go-github/v64 v64.0.0 // indirect
+	github.com/google/go-github/v75 v75.0.0 // indirect
 	github.com/google/go-querystring v1.1.0 // indirect
 	github.com/google/pprof v0.0.0-20250128161936-077ca0a936bf // indirect
 	github.com/gorilla/mux v1.8.0 // indirect
