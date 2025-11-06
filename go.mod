@@ -5,7 +5,7 @@ go 1.24.4
 toolchain go1.24.10
 
 require (
-	github.com/alecthomas/kong v1.10.0
+	github.com/alecthomas/kong v1.12.1
 	github.com/bradleyfalzon/ghinstallation/v2 v2.17.0
 	github.com/fluxcd/kustomize-controller/api v1.5.1
 	github.com/go-logr/logr v1.4.3
