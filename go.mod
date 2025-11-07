@@ -14,7 +14,7 @@ require (
 	github.com/hashicorp/go-retryablehttp v0.7.8
 	github.com/lmittmann/tint v1.1.2
 	github.com/mattn/go-isatty v0.0.20
-	github.com/migueleliasweb/go-github-mock v1.4.0
+	github.com/migueleliasweb/go-github-mock v1.5.0
 	github.com/samber/slog-multi v1.5.0
 	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/contrib/bridges/otelslog v0.10.0
