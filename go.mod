@@ -16,7 +16,7 @@ require (
 	github.com/mattn/go-isatty v0.0.20
 	github.com/migueleliasweb/go-github-mock v1.4.0
 	github.com/samber/slog-multi v1.5.0
-	github.com/stretchr/testify v1.10.0
+	github.com/stretchr/testify v1.11.1
 	go.opentelemetry.io/contrib/bridges/otelslog v0.10.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace v0.60.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.60.0
