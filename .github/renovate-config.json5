@@ -46,6 +46,23 @@
       "schedule": "* 0-4 * * 1",
       "matchPackageNames": ["ghcr.io/renovatebot/renovate"],
     },
+    // Do not pin docker-compose dependencies since these are for development
+    // only and are updated too frequently:
+    {
+      "matchManagers": [
+        "docker-compose"
+      ],
+      "pinDigests": false
+    },
+    {
+      "matchManagers": [
+        "docker-compose"
+      ],
+      "matchUpdateTypes": [
+        "pinDigest"
+      ],
+      "enabled": false
+    },
   ],
   "platformCommit": "enabled",
   "rebaseWhen": "behind-base-branch",
