@@ -46,14 +46,8 @@
     // Do not pin docker-compose dependencies since these are for development
     // only and are updated too frequently:
     {
-      "matchManagers": [
-        "docker-compose"
-      ],
-      "pinDigests": false
-    },
-    {
-      "matchManagers": [
-        "docker-compose"
+      "matchFileNames": [
+        "docker-compose.yml"
       ],
       "matchUpdateTypes": [
         "pinDigest",
