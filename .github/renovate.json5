@@ -47,7 +47,10 @@
     // only and are updated too frequently:
     {
       "matchFileNames": [
-        "docker-compose.yml"
+        "docker-compose.yml",
+      ],
+      "matchDataSources": [
+        "docker",
       ],
       "matchUpdateTypes": [
         "pinDigest",
