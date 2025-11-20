@@ -56,7 +56,9 @@
         "docker-compose"
       ],
       "matchUpdateTypes": [
-        "pinDigest"
+        "pinDigest",
+        "pin",
+        "digest",
       ],
       "enabled": false
     },
