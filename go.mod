@@ -8,7 +8,7 @@ require (
 	github.com/fluxcd/kustomize-controller/api v1.7.3
 	github.com/go-logr/logr v1.4.3
 	github.com/go-slog/otelslog v0.3.0
-	github.com/google/go-github/v79 v79.0.0
+	github.com/google/go-github/v80 v80.0.0
 	github.com/google/uuid v1.6.0
 	github.com/gregjones/httpcache v0.0.0-20190611155906-901d90724c79
 	github.com/hashicorp/go-retryablehttp v0.7.8
