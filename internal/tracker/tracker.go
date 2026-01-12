@@ -125,24 +125,36 @@ func (r *KustomizationReconciler) getKustomization(ctx context.Context, req ctrl
 // last successful reconciliation from the Kustomization object.
 func extractReconciledCommit(ctx context.Context, log *slog.Logger, k *kustomizev1.Kustomization) (string, time.Time, error) {
 	revision := k.Status.LastAppliedRevision
+	sourceKind := k.Spec.SourceRef.Kind
 
-	log = log.With("kustomization.revision", revision)
+	log = log.With("kustomization.revision", revision, "kustomization.sourceKind", sourceKind)
 
 	if revision == "" {
 		return "", time.Time{}, fmt.Errorf("kustomization `%s` has no last applied revision", k.GroupVersionKind().String())
 	}
 
-	// master@sha1:123456 (sha1 is a literal, not a variable: it's the hash
-	// algorithm)
-	parts := strings.Split(revision, ":")
-	if len(parts) != 2 {
-		log.ErrorContext(ctx, "invalid revision format")
+	var kubeManifestsHash string
 
-		// Don't requeue, format is unlikely to change
-		return "", time.Time{}, nil
+	if sourceKind == "OCIRepository" {
+		// For OCIRepository sources, the kube-manifests commit SHA is stored in
+		// LastAppliedOriginRevision (from the org.opencontainers.image.revision image annotation)
+		kubeManifestsHash = k.Status.LastAppliedOriginRevision
+		if kubeManifestsHash == "" {
+			log.ErrorContext(ctx, "OCIRepository source has no LastAppliedOriginRevision")
+			return "", time.Time{}, nil
+		}
+	} else {
+		// For GitRepository sources, parse the revision format: master@sha1:123456
+		// (sha1 is a literal, not a variable: it's the hash algorithm)
+		parts := strings.Split(revision, ":")
+		if len(parts) != 2 {
+			log.ErrorContext(ctx, "invalid revision format")
+
+			// Don't requeue, format is unlikely to change
+			return "", time.Time{}, nil
+		}
+		kubeManifestsHash = parts[1]
 	}
-
-	kubeManifestsHash := parts[1]
 
 	var timeApplied time.Time
 	for _, condition := range k.Status.Conditions {

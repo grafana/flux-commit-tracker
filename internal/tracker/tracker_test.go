@@ -179,6 +179,87 @@ func TestKustomizationReconciler_Reconcile_Success(t *testing.T) {
 	otel.AssertHistogramValue(t, metrics, MetricE2EExportTime, expectedE2ETime)
 }
 
+// TestKustomizationReconciler_Reconcile_OCIRepository_Success tests that OCIRepository
+// sources correctly extract the kube-manifests hash from LastAppliedOriginRevision
+// (which comes from the org.opencontainers.image.revision OCI annotation).
+func TestKustomizationReconciler_Reconcile_OCIRepository_Success(t *testing.T) {
+	scheme := setupScheme(t)
+	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	namespace := "test-ns"
+	name := "test-kustomization-oci"
+	kubeManifestsHash := "7fffb7d913b054f730376425dd9360fdc1647140"
+	ociRevision := "master@sha256:6971561bf3f0adf0ae0059420b3778302e4c8e44e2ed27bd9acc900b3a7ed45e"
+	dtCommitHash := "fedcba654321"
+
+	timeApplied := time.Now().Add(-5 * time.Minute).Truncate(time.Second)
+	kubeManifestsCommitTime := timeApplied.Add(-10 * time.Minute).Truncate(time.Second)
+	dtCommitTime := kubeManifestsCommitTime.Add(-15 * time.Minute).Truncate(time.Second)
+
+	kustomization := &kustomizev1.Kustomization{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+			UID:       types.UID("test-uid-oci"),
+		},
+		Spec: kustomizev1.KustomizationSpec{
+			SourceRef: kustomizev1.CrossNamespaceSourceReference{
+				Kind: "OCIRepository",
+				Name: "kube-manifests-oci",
+			},
+		},
+		Status: kustomizev1.KustomizationStatus{
+			LastAppliedRevision: ociRevision,
+			// LastAppliedOriginRevision contains the kube-manifests commit SHA
+			// from the org.opencontainers.image.revision OCI annotation
+			LastAppliedOriginRevision: kubeManifestsHash,
+			Conditions: []metav1.Condition{
+				{
+					Type:               "Ready",
+					Status:             metav1.ConditionTrue,
+					Reason:             kustomizev1beta2.ReconciliationSucceededReason,
+					LastTransitionTime: metav1.Time{Time: timeApplied},
+				},
+			},
+		},
+	}
+
+	exporterInfo := github.ExporterInfo{
+		CommitsSinceLastExport: []*github.CommitInfo{
+			{Hash: dtCommitHash, Time: dtCommitTime},
+		},
+	}
+
+	fakeGH := &fakeGitHubClient{
+		CommitTimes: map[string]time.Time{
+			kubeManifestsHash: kubeManifestsCommitTime,
+		},
+		ExporterInfos: map[string]github.ExporterInfo{
+			kubeManifestsHash: exporterInfo,
+		},
+	}
+
+	fakeK8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(kustomization).Build()
+
+	reconciler := &KustomizationReconciler{
+		Client: fakeK8sClient,
+		Scheme: scheme,
+		Log:    log,
+		GitHub: fakeGH,
+	}
+
+	req := ctrl.Request{
+		NamespacedName: types.NamespacedName{
+			Name:      name,
+			Namespace: namespace,
+		},
+	}
+	result, err := reconciler.Reconcile(t.Context(), req)
+	
+	require.NoError(t, err)
+	require.Equal(t, ctrl.Result{}, result)
+}
+
 func TestKustomizationReconciler_Reconcile_KustomizationNotFound(t *testing.T) {
 	scheme := setupScheme(t)
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})) // Use Error level to avoid noise
