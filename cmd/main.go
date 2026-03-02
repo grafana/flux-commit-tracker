@@ -11,9 +11,10 @@ import (
 	"github.com/alecthomas/kong"
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 	kustomizev1beta2 "github.com/fluxcd/kustomize-controller/api/v1beta2"
+	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	"github.com/go-logr/logr"
-	"github.com/grafana/flux-commit-tracker/internal/github"
 	internallogger "github.com/grafana/flux-commit-tracker/internal/logger"
+	"github.com/grafana/flux-commit-tracker/internal/oci"
 	internalotel "github.com/grafana/flux-commit-tracker/internal/otel"
 	"github.com/grafana/flux-commit-tracker/internal/tracker"
 	"github.com/lmittmann/tint"
@@ -46,6 +47,7 @@ func init() {
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = kustomizev1.AddToScheme(scheme)
 	_ = kustomizev1beta2.AddToScheme(scheme)
+	_ = sourcev1.AddToScheme(scheme)
 }
 
 // ControllerConfig holds configuration for the controller
@@ -65,8 +67,6 @@ type TelemetryConfig struct {
 	Insecure bool `help:"Whether to use insecure connection for OTLP telemetry." default:"true" env:"TELEMETRY_INSECURE"`
 }
 
-// CLI represents the command-line interface options: the controller config plus
-// GitHub auth credentials
 type CLI struct {
 	Config    ControllerConfig `embed:""`
 	Telemetry TelemetryConfig  `embed:"" prefix:"telemetry-"`
@@ -74,24 +74,13 @@ type CLI struct {
 	// The enum is in capitals, but any casing will work. `slog.Level`'s
 	// `UnmarshalText` method is case-insensitive.
 	LogLevel slog.Level `help:"Log level (trace, debug, info, warn, error)" enum:"TRACE,DEBUG,INFO,WARN,ERROR" env:"LOG_LEVEL" default:"INFO"`
-
-	Token github.TokenAuth `embed:""`
-	App   github.AppAuth   `embed:""`
-}
-
-func (c CLI) Validate(kctx *kong.Context) error {
-	if c.Token.GithubToken == "" && c.App.GithubAppID == 0 {
-		return fmt.Errorf("either GITHUB_TOKEN or GITHUB_APP_ID, GITHUB_APP_PRIVATE_KEY and GITHUB_APP_INSTALLATION_ID must be set")
-	}
-
-	return nil
 }
 
 func main() {
 	var cli CLI
 
 	parser, err := kong.New(&cli,
-		kong.Name("flux-coammit-tracker"),
+		kong.Name("flux-commit-tracker"),
 		kong.Description("Kubernetes controller that tracks the time taken from commit to flux apply."),
 		kong.UsageOnError(),
 	)
@@ -137,24 +126,13 @@ func (cli CLI) run(handler slog.Handler) error {
 	if err != nil {
 		return fmt.Errorf("unable to set up OpenTelemetry SDK: %w", err)
 	}
-	defer func() {
-		initialLogger.Info("shutting down telemetry...")
-		if shutdownErr := otelShutdown(context.Background()); shutdownErr != nil {
-			initialLogger.Error(shutdownErr, "telemetry shutdown error")
-			err = errors.Join(err, shutdownErr)
-		}
-	}()
+	defer shutdownTelemetry(initialLogger, otelShutdown, &err)
 
 	// Set the logger used by the Kubernetes controller runtime to log to stdout
 	// and/or otlp, according to the telemetry mode.
 	finalLogrLogger := internallogger.FromSlog(configuredSlogLogger)
 	ctrl.SetLogger(finalLogrLogger)
 	finalLogrLogger.Info("telemetry initialised", "mode", cli.Telemetry.Mode)
-
-	ghClient, err := github.NewGitHubClient(ctx, configuredSlogLogger, cli.Token, cli.App)
-	if err != nil {
-		return fmt.Errorf("unable to create GitHub client: %w", err)
-	}
 
 	cfg, err := getKubeConfig(cli.Config.KubeContext)
 	if err != nil {
@@ -187,7 +165,7 @@ func (cli CLI) run(handler slog.Handler) error {
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
 		Log:    configuredSlogLogger.With("name", "flux-commit-tracker-controller"),
-		GitHub: ghClient,
+		OCI:    oci.NewResolver(),
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create controller: %w", err)
 	}
@@ -198,6 +176,14 @@ func (cli CLI) run(handler slog.Handler) error {
 	}
 
 	return err
+}
+
+func shutdownTelemetry(logger logr.Logger, shutdown func(context.Context) error, runErr *error) {
+	logger.Info("shutting down telemetry...")
+	if shutdownErr := shutdown(context.Background()); shutdownErr != nil {
+		logger.Error(shutdownErr, "telemetry shutdown error")
+		*runErr = errors.Join(*runErr, shutdownErr)
+	}
 }
 
 func getKubeConfig(kubeContext string) (*rest.Config, error) {
@@ -239,7 +225,7 @@ func setupManagerOptions(config *ControllerConfig, logger logr.Logger) manager.O
 		Cache: cache.Options{
 			ByObject: map[client.Object]cache.ByObject{
 				&kustomizev1.Kustomization{}: {
-					Field: fields.OneTermEqualSelector("metadata.name", fmt.Sprintf("kube-manifests-%s", namespace)),
+					Field: fields.OneTermEqualSelector("metadata.name", fmt.Sprintf("kube-manifests-oci-%s", namespace)),
 					Namespaces: map[string]cache.Config{
 						namespace: {},
 					},
