@@ -102,7 +102,7 @@ func (c *remoteRegistryClient) GetLayerBlob(ctx context.Context, reference strin
 		span.SetStatus(codes.Error, "Failed to open compressed layer stream")
 		return nil, fmt.Errorf("reading OCI layer stream: %w", err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	data, err := io.ReadAll(reader)
 	if err != nil {

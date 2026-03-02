@@ -139,7 +139,7 @@ We push a Docker image to the GitHub Container Registry:
 
 ```bash
 docker run --rm \
-  -v ${DOCKER_CONFIG_DIR:-$HOME/.docker}:/root/.docker:ro \
+  -v /path/to/docker-config-dir:/root/.docker:ro \  # e.g. ~/.docker:/root/.docker:ro
   ghcr.io/grafana/flux-commit-tracker:latest \
   --log-level=debug
 ```
