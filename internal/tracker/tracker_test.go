@@ -94,7 +94,7 @@ func TestKustomizationReconciler_Reconcile_OCIRepository_Success(t *testing.T) {
 	ctx := t.Context()
 	testOtel, err := otel.SetupTestTelemetry(ctx, "test-service")
 	require.NoError(t, err)
-	defer testOtel.Shutdown(ctx)
+	defer func() { _ = testOtel.Shutdown(ctx) }()
 
 	scheme := setupScheme(t)
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
