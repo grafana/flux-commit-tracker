@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	kustomizev1 "github.com/fluxcd/kustomize-controller/api/v1"
 	kustomizev1beta2 "github.com/fluxcd/kustomize-controller/api/v1beta2"
-	"github.com/grafana/flux-commit-tracker/internal/github"
+	sourcev1 "github.com/fluxcd/source-controller/api/v1"
+	"github.com/grafana/flux-commit-tracker/internal/oci"
 	otel "go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
@@ -28,9 +29,7 @@ const (
 	Prefix = "flux-commit-tracker"
 
 	// Metric names
-	MetricE2EExportTime                   = Prefix + ".e2e.export-time"
-	MetricKubeManifestsExporterExportTime = Prefix + ".kube-manifests-exporter.export-time"
-	MetricFluxReconcileTime               = Prefix + ".flux.reconcile-time"
+	MetricE2EExportTime = Prefix + ".e2e.export-time"
 
 	InstrumentationScope = "tracker"
 )
@@ -41,9 +40,7 @@ var (
 	meter  = otel.Meter(InstrumentationScope)
 
 	// metrics
-	exportTime                      metric.Float64Histogram
-	kubeManifestsExporterExportTime metric.Float64Histogram
-	fluxReconcileTime               metric.Float64Histogram
+	exportTime metric.Float64Histogram
 
 	// attributes
 	attrControllerName = attribute.String("k8s.controller.name", "flux-commit-tracker")
@@ -66,24 +63,6 @@ func init() {
 	if err != nil {
 		panic(fmt.Sprintf("failed to create exportTime histogram: %v", err))
 	}
-
-	kubeManifestsExporterExportTime, err = meter.Float64Histogram(
-		MetricKubeManifestsExporterExportTime,
-		metric.WithDescription("Time taken from deployment-tools commit to kube-manifests commit"),
-		metric.WithUnit("s"),
-	)
-	if err != nil {
-		panic(fmt.Sprintf("failed to create kubeManifestsExporterExportTime histogram: %v", err))
-	}
-
-	fluxReconcileTime, err = meter.Float64Histogram(
-		MetricFluxReconcileTime,
-		metric.WithDescription("Time taken from kube-manifests commit to flux apply"),
-		metric.WithUnit("s"),
-	)
-	if err != nil {
-		panic(fmt.Sprintf("failed to create fluxReconcileTime histogram: %v", err))
-	}
 }
 
 // KustomizationReconciler reconciles a Kustomization object, tracking the time
@@ -92,7 +71,15 @@ type KustomizationReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	Log    *slog.Logger
-	GitHub github.Client
+	OCI    oci.Resolver
+}
+
+type reconciledState struct {
+	SourceKind          string
+	SourceName          string
+	SourceNamespace     string
+	LastAppliedRevision string
+	TimeApplied         time.Time
 }
 
 // getKustomization fetches the Kustomization object from the cluster. It
@@ -121,39 +108,17 @@ func (r *KustomizationReconciler) getKustomization(ctx context.Context, req ctrl
 	return &kustomization, nil
 }
 
-// extractReconciledCommit extracts the kube-manifests hash and the time of the
+// extractReconciledState extracts source/revision metadata and the time of the
 // last successful reconciliation from the Kustomization object.
-func extractReconciledCommit(ctx context.Context, log *slog.Logger, k *kustomizev1.Kustomization) (string, time.Time, error) {
+func extractReconciledState(ctx context.Context, log *slog.Logger, k *kustomizev1.Kustomization) (reconciledState, error) {
 	revision := k.Status.LastAppliedRevision
 	sourceKind := k.Spec.SourceRef.Kind
+	sourceNamespace := k.Spec.SourceRef.Namespace
 
 	log = log.With("kustomization.revision", revision, "kustomization.sourceKind", sourceKind)
 
 	if revision == "" {
-		return "", time.Time{}, fmt.Errorf("kustomization `%s` has no last applied revision", k.GroupVersionKind().String())
-	}
-
-	var kubeManifestsHash string
-
-	if sourceKind == "OCIRepository" {
-		// For OCIRepository sources, the kube-manifests commit SHA is stored in
-		// LastAppliedOriginRevision (from the org.opencontainers.image.revision image annotation)
-		kubeManifestsHash = k.Status.LastAppliedOriginRevision
-		if kubeManifestsHash == "" {
-			log.ErrorContext(ctx, "OCIRepository source has no LastAppliedOriginRevision")
-			return "", time.Time{}, nil
-		}
-	} else {
-		// For GitRepository sources, parse the revision format: master@sha1:123456
-		// (sha1 is a literal, not a variable: it's the hash algorithm)
-		parts := strings.Split(revision, ":")
-		if len(parts) != 2 {
-			log.ErrorContext(ctx, "invalid revision format")
-
-			// Don't requeue, format is unlikely to change
-			return "", time.Time{}, nil
-		}
-		kubeManifestsHash = parts[1]
+		return reconciledState{}, fmt.Errorf("kustomization `%s` has no last applied revision", k.GroupVersionKind().String())
 	}
 
 	var timeApplied time.Time
@@ -167,78 +132,35 @@ func extractReconciledCommit(ctx context.Context, log *slog.Logger, k *kustomize
 	if timeApplied.IsZero() {
 		log.InfoContext(ctx, "kustomization has not reconciled successfully yet, skipping")
 
-		return "", time.Time{}, fmt.Errorf("kustomization '%s/%s' has not reconciled successfully yet", k.Namespace, k.Name)
+		return reconciledState{}, fmt.Errorf("kustomization '%s/%s' has not reconciled successfully yet", k.Namespace, k.Name)
 	}
 
-	return kubeManifestsHash, timeApplied, nil
+	return reconciledState{
+		SourceKind:          sourceKind,
+		SourceName:          k.Spec.SourceRef.Name,
+		SourceNamespace:     sourceNamespace,
+		LastAppliedRevision: revision,
+		TimeApplied:         timeApplied,
+	}, nil
 }
 
-// recordKubeManifestsMetrics fetches the time of the reconciled commit from
-// GitHub's API, and uses it to record related metrics.
-func (r *KustomizationReconciler) recordKubeManifestsMetrics(ctx context.Context, log *slog.Logger, repo github.GitHubRepo, hash string, timeApplied time.Time, metricAttributes attribute.Set) (kubeManifestsCommitTime time.Time, err error) {
-	ctx, span := tracer.Start(ctx, "recordKubeManifestsMetrics")
-	defer span.End()
-
-	log = log.With("repo.kube_manifests.hash", hash, "flux.apply_time", timeApplied.UTC().String())
-	log.DebugContext(ctx, "detected flux apply, fetching kube-manifests commit info")
-
-	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	kubeManifestsCommitTime, err = r.GitHub.FetchCommitTime(timeoutCtx, log, repo, hash)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "Failed to fetch kube-manifests commit time")
-
-		// Requeue in case of transient GitHub API errors
-		return time.Time{}, fmt.Errorf("failed to fetch kube-manifests commit time: %w", err)
-	}
-
-	span.SetAttributes(attribute.String("repo.kube_manifests.commit_time", kubeManifestsCommitTime.UTC().String()))
-	log = log.With("repo.kube_manifests.commit_time", kubeManifestsCommitTime.UTC().String())
-
-	// Calculate and record time from kube-manifests commit to flux apply
-	timeFromKubeManifestsCommitToFluxApply := timeApplied.Sub(kubeManifestsCommitTime)
-	fluxReconcileTime.Record(ctx, timeFromKubeManifestsCommitToFluxApply.Seconds(), metric.WithAttributeSet(metricAttributes))
-
-	log.DebugContext(ctx, "calculated flux reconcile time", "duration_seconds", timeFromKubeManifestsCommitToFluxApply.Seconds())
-	span.SetStatus(codes.Ok, "Successfully processed kube-manifests commit")
-
-	return kubeManifestsCommitTime, nil
-}
-
-// processDeploymentToolsCommits fetches exporter info and processes deployment-tools commits.
+// processDeploymentToolsCommits processes deployment_tools commits from
+// exporter-info metadata.
 func (r *KustomizationReconciler) processDeploymentToolsCommits(
 	ctx context.Context,
 	log *slog.Logger,
-	kubeManifestsRepo github.GitHubRepo,
-	kubeManifestsHash string,
-	kubeManifestsCommitTime time.Time,
+	exporterInfo oci.ExporterInfo,
 	timeApplied time.Time,
 	metricAttributes attribute.Set,
 ) error {
 	ctx, span := tracer.Start(ctx, "processDeploymentToolsCommits")
 	defer span.End()
 
-	log.DebugContext(ctx, "fetching exporter info file")
-
-	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	exporterInfoForHash, err := r.GitHub.FetchExporterInfo(timeoutCtx, log, kubeManifestsRepo, kubeManifestsHash)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "Failed to fetch exporter info")
-
-		// Requeue in case of transient GitHub API errors
-		return fmt.Errorf("failed to fetch exporter info file: %w", err)
-	}
-
-	commits := exporterInfoForHash.CommitsSinceLastExport
+	commits := exporterInfo.CommitsSinceLastExport
 	span.SetAttributes(attribute.Int("kube_manifests.exporter.info.commits_exported", len(commits)))
 
 	if len(commits) == 0 {
-		log.WarnContext(ctx, "found kube-manifests commit with no deployment-tools commits. How did this happen?")
+		log.WarnContext(ctx, "exporter-info contains no deployment-tools commits")
 		span.SetStatus(codes.Ok, "No deployment-tools commits found")
 
 		// Even though this is unexpected, it isn't going to change, so don't
@@ -249,13 +171,6 @@ func (r *KustomizationReconciler) processDeploymentToolsCommits(
 	log.DebugContext(ctx, "processing deployment-tools commits", "count", len(commits))
 
 	for _, commit := range commits {
-		// Calculate and record time from deployment-tools commit to kube-manifests
-		// commit (the first part of the process)
-		timeFromDeploymentToolsCommitToKubeManifestsCommit := kubeManifestsCommitTime.Sub(commit.Time)
-		kubeManifestsExporterExportTime.Record(ctx, timeFromDeploymentToolsCommitToKubeManifestsCommit.Seconds(),
-			metric.WithAttributeSet(metricAttributes),
-		)
-
 		// Calculate and record total time from deployment-tools commit to flux
 		// apply (the total time taken for the process)
 		timeFromDeploymentToolsCommitToApply := timeApplied.Sub(commit.Time)
@@ -263,23 +178,45 @@ func (r *KustomizationReconciler) processDeploymentToolsCommits(
 			metric.WithAttributeSet(metricAttributes),
 		)
 
-		// This duration is the same for all deployment-tools commits in this batch. This is recor
-		timeFromKubeManifestsCommitToFluxApply := timeApplied.Sub(kubeManifestsCommitTime)
-
-		log.InfoContext(
-			ctx,
-			"calculated deployment times",
+		logAttributes := []any{
 			"repo.deployment_tools.hash", commit.Hash,
 			"repo.deployment_tools.time", commit.Time.UTC().String(),
-			"duration.deployment_tools_commit_to_kube_manifests_commit_seconds", timeFromDeploymentToolsCommitToKubeManifestsCommit.Seconds(),
-			"duration.kube_manifests_commit_to_flux_apply_seconds", timeFromKubeManifestsCommitToFluxApply.Seconds(),
 			"duration.e2e_deployment_tools_commit_to_flux_apply_seconds", timeFromDeploymentToolsCommitToApply.Seconds(),
-		)
+		}
+
+		log.InfoContext(ctx, "calculated deployment times", logAttributes...)
 	}
 
 	span.SetStatus(codes.Ok, "Successfully processed deployment-tools commits")
 
 	return nil
+}
+
+func (r *KustomizationReconciler) fetchExporterInfoFromOCI(ctx context.Context, log *slog.Logger, sourceNamespace, sourceName, appliedRevision string) (oci.ExporterInfo, error) {
+	repositoryURL, err := r.getOCIRepositoryURL(ctx, sourceNamespace, sourceName)
+	if err != nil {
+		return oci.ExporterInfo{}, fmt.Errorf("failed to resolve OCIRepository URL: %w", err)
+	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	info, err := r.OCI.FetchExporterInfo(timeoutCtx, log, repositoryURL, appliedRevision)
+	if err != nil {
+		return oci.ExporterInfo{}, fmt.Errorf("failed to fetch exporter info from OCI layer: %w", err)
+	}
+
+	return info, nil
+}
+
+func (r *KustomizationReconciler) getOCIRepositoryURL(ctx context.Context, namespace, name string) (string, error) {
+	ociRepository := &sourcev1.OCIRepository{}
+
+	if err := r.Get(ctx, k8stypes.NamespacedName{Namespace: namespace, Name: name}, ociRepository); err != nil {
+		return "", err
+	}
+
+	return ociRepository.Spec.URL, nil
 }
 
 // Reconcile is the main reconciliation loop for Kustomization resources.
@@ -316,36 +253,41 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	span.SetAttributes(attribute.String("k8s.resource.uid", string(kustomization.UID)))
 
 	// 2. Extract Data
-	kubeManifestsHash, timeApplied, err := extractReconciledCommit(ctx, log, kustomization)
+	state, err := extractReconciledState(ctx, log, kustomization)
 	if err != nil {
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "Failed to extract reconciled commit")
+		span.SetStatus(codes.Error, "Failed to extract reconciled state")
 
-		log.ErrorContext(ctx, "failed to extract reconciled commit", "error", err)
+		log.ErrorContext(ctx, "failed to extract reconciled state", "error", err)
 
 		return ctrl.Result{}, err
 	}
 
-	span.SetAttributes(attribute.String("repo.kube_manifests.hash", kubeManifestsHash))
+	span.SetAttributes(
+		attribute.String("k8s.source.kind", state.SourceKind),
+		attribute.String("k8s.source.name", state.SourceName),
+		attribute.String("k8s.source.namespace", state.SourceNamespace),
+		attribute.String("kustomization.revision", state.LastAppliedRevision),
+	)
 
-	// 3. Process `kube-manifests` commit & metrics
-	kubeManifestsRepo := github.GitHubRepo{Owner: "grafana", Repo: "kube-manifests"}
 	metricAttributes := attribute.NewSet(
 		attribute.String("k8s.resource.name", req.Name),
 		attribute.String("k8s.namespace.name", req.Namespace),
+		attribute.String("k8s.source.kind", state.SourceKind),
 	)
-	kubeManifestsCommitTime, err := r.recordKubeManifestsMetrics(ctx, log, kubeManifestsRepo, kubeManifestsHash, timeApplied, metricAttributes)
+
+	exporterInfo, err := r.fetchExporterInfoFromOCI(ctx, log, state.SourceNamespace, state.SourceName, state.LastAppliedRevision)
 	if err != nil {
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "Failed to process kube-manifests metrics")
+		span.SetStatus(codes.Error, "Failed to fetch exporter-info from OCI")
 
-		log.ErrorContext(ctx, "failed to process kube-manifests metrics", "error", err)
+		log.ErrorContext(ctx, "failed to fetch exporter-info from OCI", "error", err)
 
 		return ctrl.Result{}, err
 	}
 
-	// 4. Process `deployment_tools` commits & metrics
-	err = r.processDeploymentToolsCommits(ctx, log, kubeManifestsRepo, kubeManifestsHash, kubeManifestsCommitTime, timeApplied, metricAttributes)
+	// 3. Process `deployment_tools` commits & metrics
+	err = r.processDeploymentToolsCommits(ctx, log, exporterInfo, state.TimeApplied, metricAttributes)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "Failed to process deployment-tools commits")
