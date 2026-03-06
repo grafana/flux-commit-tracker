@@ -1,0 +1,13 @@
+{
+  "commit": "cptpicard",
+  "commits_since_last_export": [
+    {
+      "hash": "ltdata",
+      "summary": "update deployment",
+      "author": "Example Author",
+      "email": "author@example.com",
+      "time": "2026-01-12T10:00:00Z"
+    }
+  ],
+  "export_build_link": "https://example.invalid/build/123"
+}

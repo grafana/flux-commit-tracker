@@ -29,32 +29,27 @@ understand what we're measuring here.
    the modified environments. The `tk tool importers` subcommand is used to
    determine this in the case of library changes.
 4. If there are any changes, a commit to `kube-manifests` with the
-   updated Kubernetes YAMLs produced by `tk export` is made and pushed. Grafana
-   Cloud is made up of several clusters, and the YAMLs end up in a directory
-   corresponding to their cluster. Alongside this, a file `exporter-info.json`
-   is updated to contain details about the commits which were exported in this
-   run.
-5. [Flux], running in each cluster and watching the `kube-manifests` repository,
-   detects the change. Each cluster's flux is configured to watch for changes in
-   its own directory. It looks at the commit to determine if it needs to do
-   anything, and acts accordingly.
+   updated Kubernetes YAMLs produced by `tk export` is made and pushed, and
+   an OCI image containing the manifests of the changed cluster(s) is pushed
+   to its own GAR repo. Grafana Cloud is made up of several clusters, and the
+   YAMLs end up in a directory corresponding to their cluster. Alongside this,
+   a file `exporter-info.json` is updated to contain details about the commits
+   which were exported in this run.
+5. [Flux], running in each tracked cluster, reconciles from the cluster's
+   OCI image in GAR. It detects new revisions, determines if it needs to apply
+   changes, and acts accordingly.
 
-When Flux finds a new commit in `kube-manifests`, it updates the
-`status.lastAppliedRevision` of its `Kustomization` objects. This creates an
-event in the cluster which we hook into here. We can see the commits as Flux
-sees them, then go off and fetch the `exporter-info.json` file, and calculate
-the times which we need.
+When Flux finds a new revision, it updates the `status.lastAppliedRevision` of
+its `Kustomization` objects. This creates an event in the cluster which we hook
+into here. We read the applied OCI revision as Flux sees it, fetch the OCI
+manifest by digest, extract the exporter-info layer
+(`application/vnd.grafana.exporter-info.v1+json`), and calculate timings from
+that payload.
 
 ## Metrics exported
 
-- `flux_commit_tracker.kube-manifests-exporter.export-time`: The time taken
-  for the exporter to export the changes to `kube-manifests` and push them.
-- `flux_commit_tracker.flux.reconcile-time`: The time taken for Flux to
-  notice the commit and apply it to the cluster.
 - `flux_commit_tracker.e2e.export-time`: The time taken for the
-  exporter to export the changes to `kube-manifests` and push them, plus the
-  time taken for Flux to notice the commit and apply it to the cluster (the
-  total of the above metrics).
+  deployment_tools commit to be applied by Flux in the cluster.
 
 [Flux]: https://fluxcd.io/
 [Tanka]: https://tanka.dev/
@@ -91,9 +86,6 @@ There are two main ways to run `flux-commit-tracker`:
 
 ## Configuration
 
-You need to provide GitHub credentials either via a Personal Access Token or a
-GitHub App configuration.
-
 Configuration can be provided via command-line flags or environment variables:
 
 | Flag                   | Environment Variable         | Description                        |
@@ -105,10 +97,6 @@ Configuration can be provided via command-line flags or environment variables:
 | `--telemetry-endpoint` | `TELEMETRY_ENDPOINT`         | OTLP endpoint (host:port)          |
 | `--telemetry-insecure` | `TELEMETRY_INSECURE`         | Use insecure OTLP conn             |
 | `--telemetry-mode`     | `TELEMETRY_MODE`             | Telemetry mode                     |
-| _(N/A)_                | `GITHUB_TOKEN`               | GitHub PAT                         |
-| _(N/A)_                | `GITHUB_APP_ID`              | GitHub App ID                      |
-| _(N/A)_                | `GITHUB_APP_PRIVATE_KEY`     | GitHub App Private Key             |
-| _(N/A)_                | `GITHUB_APP_INSTALLATION_ID` | GitHub App Install ID              |
 
 The controller supports several telemetry modes via the `--telemetry-mode`
 flag / `TELEMETRY_MODE` env var. This determines whether telemetry is printed to
@@ -126,12 +114,9 @@ lot of data._
 - `stdout-all`: Outputs all telemetry to the console (can be noisy).
 - `stdout-all+otlp`: Sends to OTLP _and_ outputs all telemetry to console.
 
-**Example (running locally, OTLP mode, GitHub Token):**
-
-This example reuses the `gh` CLI's GitHub token.
+**Example (running locally, OTLP mode):**
 
 ```console
-GITHUB_TOKEN=$(gh auth token) \
 go run \
   github.com/grafana/flux-commit-tracker/cmd/ \
     --kube-context=dev-us-central-0 \
@@ -141,8 +126,12 @@ go run \
 If using OTLP, examine telemetry in Grafana (e.g., `http://localhost:3000`
 with the default Docker Compose setup).
 
-Remember to use the appropriate auth method (Token/App) and K8s config
-method (flag/in-cluster). See `--help` for all options.
+When running against private GAR repositories, OCI auth uses
+`authn.DefaultKeychain` from `go-containerregistry` (same pattern as
+kube-manifests-exporter). Configure credentials via standard Docker credential
+sources, e.g. `$DOCKER_CONFIG/config.json` and credential helpers.
+
+See `--help` for all options.
 
 ### Running from a Docker image
 
@@ -150,7 +139,7 @@ We push a Docker image to the GitHub Container Registry:
 
 ```bash
 docker run --rm \
-  -e GITHUB_TOKEN=$(gh auth token) \
+  -v /path/to/docker-config-dir:/root/.docker:ro \  # e.g. ~/.docker:/root/.docker:ro
   ghcr.io/grafana/flux-commit-tracker:latest \
   --log-level=debug
 ```
