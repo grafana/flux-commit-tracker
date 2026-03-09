@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/alecthomas/kong v1.14.0
 	github.com/bradleyfalzon/ghinstallation/v2 v2.17.0
-	github.com/fluxcd/kustomize-controller/api v1.8.0
+	github.com/fluxcd/kustomize-controller/api v1.8.1
 	github.com/go-logr/logr v1.4.3
 	github.com/go-slog/otelslog v0.3.0
 	github.com/google/go-github/v84 v84.0.0
