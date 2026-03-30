@@ -10,7 +10,7 @@ import (
 	kustomizev1beta2 "github.com/fluxcd/kustomize-controller/api/v1beta2"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	"github.com/grafana/flux-commit-tracker/internal/oci"
-	lru "github.com/hashicorp/golang-lru/v2"
+	lru "github.com/hashicorp/golang-lru/v2/expirable"
 	otel "go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -77,7 +77,7 @@ type KustomizationReconciler struct {
 	Scheme            *runtime.Scheme
 	Log               *slog.Logger
 	OCI               oci.Resolver
-	exporterInfoCache *lru.Cache[exporterInfoCacheKey, oci.ExporterInfo]
+	exporterInfoCache *lru.LRU[exporterInfoCacheKey, oci.ExporterInfo]
 }
 
 type reconciledState struct {
