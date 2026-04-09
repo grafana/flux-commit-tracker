@@ -322,7 +322,7 @@ jobs:
 
           echo "contextMessage= This deployment was triggered by [this pull request](https://github.com/${REPOSITORY_OWNER}/${REPOSITORY_NAME}/pull/${PR})." >> "${GITHUB_OUTPUT}"
           echo "number=${PR}" >> "${GITHUB_OUTPUT}"
-          TS=$(date -u --date ${FIRST_COMMIT_TS} +'%s')
+          TS=$(date -u --date "${FIRST_COMMIT_TS}" +'%s')
           echo "first-commit-ts=${TS}" >> "${GITHUB_OUTPUT}"
           cat "${GITHUB_OUTPUT}"
 
