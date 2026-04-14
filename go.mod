@@ -5,7 +5,7 @@ go 1.25.7
 require (
 	github.com/alecthomas/kong v1.15.0
 	github.com/fluxcd/kustomize-controller/api v1.8.3
-	github.com/fluxcd/source-controller/api v1.8.1
+	github.com/fluxcd/source-controller/api v1.8.2
 	github.com/go-logr/logr v1.4.3
 	github.com/go-slog/otelslog v0.3.0
 	github.com/google/go-containerregistry v0.21.5
