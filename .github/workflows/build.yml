@@ -258,7 +258,7 @@ jobs:
   deploy:
     name: Deploy
     runs-on: ubuntu-latest
-    if: ${{ github.event_name == 'push' && github.ref_name == 'main' }}
+    if: ${{ github.event_name == 'push' && github.ref_name == 'main' && github.repository == 'grafana/flux-commit-tracker' }}
     permissions:
       id-token: write
       contents: read
