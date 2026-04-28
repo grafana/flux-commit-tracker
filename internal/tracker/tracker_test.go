@@ -71,7 +71,7 @@ func makeOCIKustomizationObject(namespace, name, sourceNamespace, sourceName, ap
 		},
 		Spec: kustomizev1.KustomizationSpec{
 			SourceRef: kustomizev1.CrossNamespaceSourceReference{
-				Kind:      ociRepositoryKind,
+				Kind:      "OCIRepository",
 				Name:      sourceName,
 				Namespace: sourceNamespace,
 			},
@@ -101,7 +101,7 @@ func TestKustomizationReconciler_Reconcile_OCIRepository_Success(t *testing.T) {
 
 	namespace := "test-ns"
 	name := "test-kustomization-oci"
-	sourceName := kubeManifestsOCIRepositoryName
+	sourceName := "kube-manifests-oci"
 	ociRevision := "master@sha256:6971561bf3f0adf0ae0059420b3778302e4c8e44e2ed27bd9acc900b3a7ed45e"
 
 	timeApplied := time.Now().Add(-5 * time.Minute).Truncate(time.Second)
@@ -119,11 +119,10 @@ func TestKustomizationReconciler_Reconcile_OCIRepository_Success(t *testing.T) {
 
 	fakeK8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(kustomization, ociRepository).Build()
 	reconciler := &KustomizationReconciler{
-		Client:            fakeK8sClient,
-		Scheme:            scheme,
-		Log:               log,
-		OCI:               fakeOCI,
-		exporterInfoCache: newExporterInfoCache(),
+		Client: fakeK8sClient,
+		Scheme: scheme,
+		Log:    log,
+		OCI:    fakeOCI,
 	}
 
 	req := ctrl.Request{
@@ -152,7 +151,7 @@ func TestKustomizationReconciler_Reconcile_OCIRepository_MissingExporterInfoLaye
 
 	namespace := "test-ns"
 	name := "test-kustomization-oci-missing-layer"
-	sourceName := kubeManifestsOCIRepositoryName
+	sourceName := "kube-manifests-oci"
 	ociRevision := "master@sha256:6971561bf3f0adf0ae0059420b3778302e4c8e44e2ed27bd9acc900b3a7ed45e"
 	timeApplied := time.Now().Add(-5 * time.Minute).Truncate(time.Second)
 
@@ -162,11 +161,10 @@ func TestKustomizationReconciler_Reconcile_OCIRepository_MissingExporterInfoLaye
 
 	fakeK8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(kustomization, ociRepository).Build()
 	reconciler := &KustomizationReconciler{
-		Client:            fakeK8sClient,
-		Scheme:            scheme,
-		Log:               log,
-		OCI:               fakeOCI,
-		exporterInfoCache: newExporterInfoCache(),
+		Client: fakeK8sClient,
+		Scheme: scheme,
+		Log:    log,
+		OCI:    fakeOCI,
 	}
 
 	req := ctrl.Request{
@@ -182,65 +180,6 @@ func TestKustomizationReconciler_Reconcile_OCIRepository_MissingExporterInfoLaye
 	require.Equal(t, 1, fakeOCI.FetchCalls)
 }
 
-func TestKustomizationReconciler_Reconcile_IgnoresUnsupportedSourceKind(t *testing.T) {
-	ctx := t.Context()
-	scheme := setupScheme(t)
-	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	namespace := "test-ns"
-	name := "test-kustomization-unsupported-source"
-	revision := "main@sha1:abcdef123456"
-	timeApplied := time.Now().Add(-5 * time.Minute).Truncate(time.Second)
-
-	kustomization := &kustomizev1.Kustomization{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			UID:       types.UID("test-uid-unsupported-source"),
-		},
-		Spec: kustomizev1.KustomizationSpec{
-			SourceRef: kustomizev1.CrossNamespaceSourceReference{
-				Kind:      "Bucket",
-				Name:      "test-source",
-				Namespace: "flux-system",
-			},
-		},
-		Status: kustomizev1.KustomizationStatus{
-			LastAppliedRevision: revision,
-			Conditions: []metav1.Condition{
-				{
-					Type:               "Ready",
-					Status:             metav1.ConditionTrue,
-					Reason:             kustomizev1beta2.ReconciliationSucceededReason,
-					LastTransitionTime: metav1.Time{Time: timeApplied},
-				},
-			},
-		},
-	}
-
-	fakeOCI := &fakeOCIResolver{}
-	fakeK8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(kustomization).Build()
-	reconciler := &KustomizationReconciler{
-		Client:            fakeK8sClient,
-		Scheme:            scheme,
-		Log:               log,
-		OCI:               fakeOCI,
-		exporterInfoCache: newExporterInfoCache(),
-	}
-
-	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      name,
-			Namespace: namespace,
-		},
-	}
-	result, err := reconciler.Reconcile(ctx, req)
-
-	require.NoError(t, err)
-	require.Equal(t, ctrl.Result{}, result)
-	require.Equal(t, 0, fakeOCI.FetchCalls)
-}
-
 func TestKustomizationReconciler_Reconcile_KustomizationNotFound(t *testing.T) {
 	scheme := setupScheme(t)
 	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
@@ -250,11 +189,10 @@ func TestKustomizationReconciler_Reconcile_KustomizationNotFound(t *testing.T) {
 
 	fakeK8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	reconciler := &KustomizationReconciler{
-		Client:            fakeK8sClient,
-		Scheme:            scheme,
-		Log:               log,
-		OCI:               &fakeOCIResolver{},
-		exporterInfoCache: newExporterInfoCache(),
+		Client: fakeK8sClient,
+		Scheme: scheme,
+		Log:    log,
+		OCI:    &fakeOCIResolver{},
 	}
 
 	req := ctrl.Request{
@@ -286,8 +224,8 @@ func TestKustomizationReconciler_Reconcile_NotYetReconciled(t *testing.T) {
 		},
 		Spec: kustomizev1.KustomizationSpec{
 			SourceRef: kustomizev1.CrossNamespaceSourceReference{
-				Kind:      ociRepositoryKind,
-				Name:      kubeManifestsOCIRepositoryName,
+				Kind:      "OCIRepository",
+				Name:      "kube-manifests-oci",
 				Namespace: namespace,
 			},
 		},
@@ -307,11 +245,10 @@ func TestKustomizationReconciler_Reconcile_NotYetReconciled(t *testing.T) {
 	fakeOCI := &fakeOCIResolver{}
 	fakeK8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(kustomization).Build()
 	reconciler := &KustomizationReconciler{
-		Client:            fakeK8sClient,
-		Scheme:            scheme,
-		Log:               log,
-		OCI:               fakeOCI,
-		exporterInfoCache: newExporterInfoCache(),
+		Client: fakeK8sClient,
+		Scheme: scheme,
+		Log:    log,
+		OCI:    fakeOCI,
 	}
 
 	req := ctrl.Request{
@@ -326,48 +263,4 @@ func TestKustomizationReconciler_Reconcile_NotYetReconciled(t *testing.T) {
 	require.EqualError(t, err, "kustomization 'test-ns/test-kustomization-pending' has not reconciled successfully yet")
 	require.Equal(t, ctrl.Result{}, result)
 	require.Equal(t, 0, fakeOCI.FetchCalls)
-}
-
-func TestKustomizationReconciler_Reconcile_ReusesCachedExporterInfo(t *testing.T) {
-	ctx := t.Context()
-	scheme := setupScheme(t)
-	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	sourceNamespace := "flux-system"
-	sourceName := kubeManifestsOCIRepositoryName
-	ociRevision := "master@sha256:9f8e7d6c5b4a39281716f5e4d3c2b1a09876543210fedcba1234567890abcdef"
-	timeApplied := time.Now().Add(-5 * time.Minute).Truncate(time.Second)
-	dtCommitTime := timeApplied.Add(-15 * time.Minute).Truncate(time.Second)
-
-	kustomizationA := makeOCIKustomizationObject("grafana", "kube-manifests-oci-grafana", sourceNamespace, sourceName, ociRevision, timeApplied)
-	kustomizationB := makeOCIKustomizationObject("mimir", "kube-manifests-oci-mimir", sourceNamespace, sourceName, ociRevision, timeApplied)
-	ociRepository := makeOCIRepositoryObject(sourceNamespace, sourceName, "oci://ghcr.io/grafana/kube-manifests")
-	fakeOCI := &fakeOCIResolver{
-		ExporterInfo: oci.ExporterInfo{
-			CommitsSinceLastExport: []*oci.CommitInfo{
-				{Hash: "fedcba654321", Time: dtCommitTime},
-			},
-		},
-	}
-
-	fakeK8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(kustomizationA, kustomizationB, ociRepository).Build()
-	reconciler := &KustomizationReconciler{
-		Client:            fakeK8sClient,
-		Scheme:            scheme,
-		Log:               log,
-		OCI:               fakeOCI,
-		exporterInfoCache: newExporterInfoCache(),
-	}
-
-	_, err := reconciler.Reconcile(ctx, ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: kustomizationA.Name, Namespace: kustomizationA.Namespace},
-	})
-	require.NoError(t, err)
-
-	_, err = reconciler.Reconcile(ctx, ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: kustomizationB.Name, Namespace: kustomizationB.Namespace},
-	})
-	require.NoError(t, err)
-
-	require.Equal(t, 1, fakeOCI.FetchCalls)
 }

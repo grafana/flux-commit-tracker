@@ -10,7 +10,6 @@ import (
 	kustomizev1beta2 "github.com/fluxcd/kustomize-controller/api/v1beta2"
 	sourcev1 "github.com/fluxcd/source-controller/api/v1"
 	"github.com/grafana/flux-commit-tracker/internal/oci"
-	lru "github.com/hashicorp/golang-lru/v2/expirable"
 	otel "go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -33,10 +32,6 @@ const (
 	MetricE2EExportTime = Prefix + ".e2e.export-time"
 
 	InstrumentationScope = "tracker"
-
-	ociRepositoryKind                 = "OCIRepository"
-	kubeManifestsOCIRepositoryName    = "kube-manifests-oci"
-	o11yAppsPlatformOCIRepositoryName = "kube-manifests-oci-o11y-apps-platform"
 )
 
 var (
@@ -74,10 +69,9 @@ func init() {
 // taken from deployment-tools commits to flux apply.
 type KustomizationReconciler struct {
 	client.Client
-	Scheme            *runtime.Scheme
-	Log               *slog.Logger
-	OCI               oci.Resolver
-	exporterInfoCache *lru.LRU[exporterInfoCacheKey, oci.ExporterInfo]
+	Scheme *runtime.Scheme
+	Log    *slog.Logger
+	OCI    oci.Resolver
 }
 
 type reconciledState struct {
@@ -86,19 +80,6 @@ type reconciledState struct {
 	SourceNamespace     string
 	LastAppliedRevision string
 	TimeApplied         time.Time
-}
-
-func isTrackedKustomization(k *kustomizev1.Kustomization) bool {
-	if k.Spec.SourceRef.Kind != ociRepositoryKind {
-		return false
-	}
-
-	switch k.Spec.SourceRef.Name {
-	case kubeManifestsOCIRepositoryName, o11yAppsPlatformOCIRepositoryName:
-		return true
-	default:
-		return false
-	}
 }
 
 // getKustomization fetches the Kustomization object from the cluster. It
@@ -217,15 +198,6 @@ func (r *KustomizationReconciler) fetchExporterInfoFromOCI(ctx context.Context, 
 		return oci.ExporterInfo{}, fmt.Errorf("failed to resolve OCIRepository URL: %w", err)
 	}
 
-	cacheKey := exporterInfoCacheKey{
-		repositoryURL: repositoryURL,
-		revision:      appliedRevision,
-	}
-	if info, ok := r.exporterInfoCache.Get(cacheKey); ok {
-		log.DebugContext(ctx, "reusing cached exporter-info", "oci.repository_url", repositoryURL, "kustomization.revision", appliedRevision)
-		return info, nil
-	}
-
 	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
@@ -234,7 +206,6 @@ func (r *KustomizationReconciler) fetchExporterInfoFromOCI(ctx context.Context, 
 		return oci.ExporterInfo{}, fmt.Errorf("failed to fetch exporter info from OCI layer: %w", err)
 	}
 
-	r.exporterInfoCache.Add(cacheKey, info)
 	return info, nil
 }
 
@@ -280,12 +251,6 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, nil
 	}
 	span.SetAttributes(attribute.String("k8s.resource.uid", string(kustomization.UID)))
-
-	if !isTrackedKustomization(kustomization) {
-		span.SetStatus(codes.Ok, "Kustomization is outside tracker scope")
-		log.DebugContext(ctx, "ignoring unsupported kustomization")
-		return ctrl.Result{}, nil
-	}
 
 	// 2. Extract Data
 	state, err := extractReconciledState(ctx, log, kustomization)
@@ -340,7 +305,6 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 // SetupWithManager sets up the controller with the Manager
 func (r *KustomizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.Scheme = mgr.GetScheme()
-	r.exporterInfoCache = newExporterInfoCache()
 	return ctrl.NewControllerManagedBy(mgr).
 		For(&kustomizev1.Kustomization{}).
 		WithEventFilter(kustomizationPredicate{}).
@@ -364,10 +328,6 @@ func (p kustomizationPredicate) Update(e event.UpdateEvent) bool {
 	oldKustomization, okOld := e.ObjectOld.(*kustomizev1.Kustomization)
 	newKustomization, okNew := e.ObjectNew.(*kustomizev1.Kustomization)
 	if !okOld || !okNew {
-		return false
-	}
-
-	if !isTrackedKustomization(newKustomization) {
 		return false
 	}
 
