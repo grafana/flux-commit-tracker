@@ -20,14 +20,23 @@ import (
 	"github.com/lmittmann/tint"
 	"github.com/mattn/go-isatty"
 	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/server"
+)
+
+const (
+	// FallbackNamespace is the namespace to look for a Kustomization in if the
+	// runtime namespace is not available.
+	FallbackNamespace = "default"
 )
 
 // k8s controller
@@ -137,12 +146,7 @@ func (cli CLI) run(handler slog.Handler) error {
 		finalLogrLogger.Error(err, "Failed to start Go runtime metrics")
 	}
 
-	mgr, err := ctrl.NewManager(cfg, manager.Options{
-		Scheme:                 scheme,
-		Metrics:                server.Options{BindAddress: cli.Config.MetricsAddr},
-		HealthProbeBindAddress: cli.Config.HealthAddr,
-		Logger:                 finalLogrLogger,
-	})
+	mgr, err := ctrl.NewManager(cfg, setupManagerOptions(&cli.Config, finalLogrLogger))
 	if err != nil {
 		return fmt.Errorf("unable to start manager: %w", err)
 	}
@@ -201,4 +205,32 @@ func getKubeConfig(kubeContext string) (*rest.Config, error) {
 	}
 
 	return cfg, nil
+}
+
+func setupManagerOptions(config *ControllerConfig, logger logr.Logger) manager.Options {
+	namespace := os.Getenv("RUNTIME_NAMESPACE")
+	if namespace == "" {
+		logger.Info("unable to determine runtime namespace, watching fallback namespace", "namespace", FallbackNamespace)
+		namespace = FallbackNamespace
+	}
+
+	kustomizationName := fmt.Sprintf("kube-manifests-oci-%s", namespace)
+	ctrl.Log.Info("watching single namespace", "namespace", namespace, "name", kustomizationName)
+
+	return manager.Options{
+		Scheme:                 scheme,
+		Metrics:                server.Options{BindAddress: config.MetricsAddr},
+		HealthProbeBindAddress: config.HealthAddr,
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&kustomizev1.Kustomization{}: {
+					Field: fields.OneTermEqualSelector("metadata.name", kustomizationName),
+					Namespaces: map[string]cache.Config{
+						namespace: {},
+					},
+				},
+			},
+		},
+		Logger: logger,
+	}
 }
