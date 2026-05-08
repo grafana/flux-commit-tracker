@@ -281,9 +281,6 @@ jobs:
                       edges {
                         node {
                           number
-                          author {
-                            login
-                          }
                           mergedBy {
                             login
                           }
@@ -314,7 +311,6 @@ jobs:
         name: Extract PR metadata
         env:
           PR: ${{ fromjson(steps.find-commit-pr.outputs.data).repository.object.associatedPullRequests.edges[0].node.number }}
-          PR_AUTHOR: ${{ fromjson(steps.find-commit-pr.outputs.data).repository.object.associatedPullRequests.edges[0].node.author.login }}
           PR_MERGED_BY: ${{ fromjson(steps.find-commit-pr.outputs.data).repository.object.associatedPullRequests.edges[0].node.mergedBy.login }}
           FIRST_COMMIT_TS: ${{ fromjson(steps.find-commit-pr.outputs.data).repository.object.associatedPullRequests.edges[0].node.commits.edges[0].node.commit.committedDate }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
@@ -328,7 +324,7 @@ jobs:
 
           echo "This commit was from PR ${PR}"
 
-          ROLLOUT_OWNER="${PR_MERGED_BY:-${PR_AUTHOR}}"
+          ROLLOUT_OWNER="${PR_MERGED_BY}"
           ROLLOUT_OWNER="$(printf '%s' "${ROLLOUT_OWNER}" | tr -cd 'A-Za-z0-9_.-')"
           if [ -n "${ROLLOUT_OWNER}" ]; then
             echo "Using ${ROLLOUT_OWNER} as the rollout owner"
