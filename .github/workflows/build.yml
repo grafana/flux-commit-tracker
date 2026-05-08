@@ -281,6 +281,12 @@ jobs:
                       edges {
                         node {
                           number
+                          author {
+                            login
+                          }
+                          mergedBy {
+                            login
+                          }
                           commits(first: 1) {
                             edges {
                               node {
@@ -304,10 +310,12 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - id: extract-pr-number
-        name: Extract PR number
+      - id: extract-pr-metadata
+        name: Extract PR metadata
         env:
           PR: ${{ fromjson(steps.find-commit-pr.outputs.data).repository.object.associatedPullRequests.edges[0].node.number }}
+          PR_AUTHOR: ${{ fromjson(steps.find-commit-pr.outputs.data).repository.object.associatedPullRequests.edges[0].node.author.login }}
+          PR_MERGED_BY: ${{ fromjson(steps.find-commit-pr.outputs.data).repository.object.associatedPullRequests.edges[0].node.mergedBy.login }}
           FIRST_COMMIT_TS: ${{ fromjson(steps.find-commit-pr.outputs.data).repository.object.associatedPullRequests.edges[0].node.commits.edges[0].node.commit.committedDate }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           REPOSITORY_NAME: ${{ github.event.repository.name }}
@@ -319,6 +327,13 @@ jobs:
           fi
 
           echo "This commit was from PR ${PR}"
+
+          ROLLOUT_OWNER="${PR_MERGED_BY:-${PR_AUTHOR}}"
+          ROLLOUT_OWNER="$(printf '%s' "${ROLLOUT_OWNER}" | tr -cd 'A-Za-z0-9_.-')"
+          if [ -n "${ROLLOUT_OWNER}" ]; then
+            echo "Using ${ROLLOUT_OWNER} as the rollout owner"
+            echo "extra_args=--labels trigger-commit-author=${ROLLOUT_OWNER}" >> "${GITHUB_OUTPUT}"
+          fi
 
           echo "contextMessage= This deployment was triggered by [this pull request](https://github.com/${REPOSITORY_OWNER}/${REPOSITORY_NAME}/pull/${PR})." >> "${GITHUB_OUTPUT}"
           echo "number=${PR}" >> "${GITHUB_OUTPUT}"
@@ -332,6 +347,7 @@ jobs:
         with:
           namespace: release-cd
           workflow_template: flux-commit-tracker
+          extra_args: ${{ steps.extract-pr-metadata.outputs.extra_args }}
           parameters: |
             dockertag=${{ needs.build.outputs.version }}
-            prCommentContext=${{ steps.extract-pr-number.outputs.contextMessage }}
+            prCommentContext=${{ steps.extract-pr-metadata.outputs.contextMessage }}
