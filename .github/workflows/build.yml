@@ -324,11 +324,9 @@ jobs:
 
           echo "This commit was from PR ${PR}"
 
-          ROLLOUT_OWNER="${PR_MERGED_BY}"
-          ROLLOUT_OWNER="$(printf '%s' "${ROLLOUT_OWNER}" | tr -cd 'A-Za-z0-9_.-')"
-          if [ -n "${ROLLOUT_OWNER}" ]; then
-            echo "Using ${ROLLOUT_OWNER} as the rollout owner"
-            echo "extra_args=--labels trigger-commit-author=${ROLLOUT_OWNER}" >> "${GITHUB_OUTPUT}"
+          if [ -n "${PR_MERGED_BY}" ]; then
+            echo "Using ${PR_MERGED_BY} as the rollout owner"
+            echo "extra_args=--labels trigger-commit-author=${PR_MERGED_BY}" >> "${GITHUB_OUTPUT}"
           fi
 
           echo "contextMessage= This deployment was triggered by [this pull request](https://github.com/${REPOSITORY_OWNER}/${REPOSITORY_NAME}/pull/${PR})." >> "${GITHUB_OUTPUT}"
