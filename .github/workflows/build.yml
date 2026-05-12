@@ -272,6 +272,13 @@ jobs:
         uses: octokit/graphql-action@ddde8ebb2493e79f390e6449c725c21663a67505 # v3.0.2
         name: Find PR for commit
         with:
+          # Because this repo uses merge queues, workflow runs triggered by
+          # pushes to main can have github.actor set to github-merge-queue[bot].
+          # Below we fetch the associated PR merger so human-owned PR rollouts
+          # are assigned to the person GitHub records as merging the PR rather
+          # than the bot that triggered the workflow. We also fetch the merger
+          # type so we only apply this override for human GitHub users, not bot
+          # accounts such as Renovate.
           query: |
             query associatedPRs($sha: String, $repo: String!, $owner: String!) {
               repository(name: $repo, owner: $owner) {
@@ -283,6 +290,7 @@ jobs:
                           number
                           mergedBy {
                             login
+                            __typename
                           }
                           commits(first: 1) {
                             edges {
@@ -312,6 +320,7 @@ jobs:
         env:
           PR: ${{ fromjson(steps.find-commit-pr.outputs.data).repository.object.associatedPullRequests.edges[0].node.number }}
           PR_MERGED_BY: ${{ fromjson(steps.find-commit-pr.outputs.data).repository.object.associatedPullRequests.edges[0].node.mergedBy.login }}
+          PR_MERGED_BY_TYPE: ${{ fromjson(steps.find-commit-pr.outputs.data).repository.object.associatedPullRequests.edges[0].node.mergedBy.__typename }}
           FIRST_COMMIT_TS: ${{ fromjson(steps.find-commit-pr.outputs.data).repository.object.associatedPullRequests.edges[0].node.commits.edges[0].node.commit.committedDate }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           REPOSITORY_NAME: ${{ github.event.repository.name }}
@@ -324,7 +333,8 @@ jobs:
 
           echo "This commit was from PR ${PR}"
 
-          if [ -n "${PR_MERGED_BY}" ]; then
+          # Only override the Argo trigger author for human PR mergers.
+          if [ "${PR_MERGED_BY_TYPE}" = "User" ]; then
             echo "Using ${PR_MERGED_BY} as the rollout owner"
             echo "extra_args=--labels trigger-commit-author=${PR_MERGED_BY}" >> "${GITHUB_OUTPUT}"
           fi
