@@ -1,0 +1,14 @@
+name: Signed commits info
+
+on:
+  pull_request:
+
+jobs:
+  signed-commits:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: grafana/signed-commits-info-action@5d082f6aeba630074da618ce4f672f3dfed16e95
