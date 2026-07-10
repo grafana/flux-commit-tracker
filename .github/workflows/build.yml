@@ -274,11 +274,11 @@ jobs:
         with:
           # Because this repo uses merge queues, workflow runs triggered by
           # pushes to main can have github.actor set to github-merge-queue[bot].
-          # Below we fetch the associated PR merger so human-owned PR rollouts
-          # are assigned to the person GitHub records as merging the PR rather
-          # than the bot that triggered the workflow. We also fetch the merger
-          # type so we only apply this override for human GitHub users, not bot
-          # accounts such as Renovate.
+          # Below we fetch the associated PR merger and approvers so human-owned
+          # PR rollouts are assigned to the person GitHub records as merging the
+          # PR rather than the bot that triggered the workflow. If a bot merged
+          # the PR, such as Renovate automerge, we fall back to the latest human
+          # approval.
           query: |
             query associatedPRs($sha: String, $repo: String!, $owner: String!) {
               repository(name: $repo, owner: $owner) {
@@ -291,6 +291,17 @@ jobs:
                           mergedBy {
                             login
                             __typename
+                          }
+                          reviews(last: 1, states: APPROVED) {
+                            edges {
+                              node {
+                                author {
+                                  login
+                                  __typename
+                                }
+                                submittedAt
+                              }
+                            }
                           }
                           commits(first: 1) {
                             edges {
@@ -318,6 +329,7 @@ jobs:
       - id: extract-pr-metadata
         name: Extract PR metadata
         env:
+          PR_METADATA: ${{ steps.find-commit-pr.outputs.data }}
           PR: ${{ fromjson(steps.find-commit-pr.outputs.data).repository.object.associatedPullRequests.edges[0].node.number }}
           PR_MERGED_BY: ${{ fromjson(steps.find-commit-pr.outputs.data).repository.object.associatedPullRequests.edges[0].node.mergedBy.login }}
           PR_MERGED_BY_TYPE: ${{ fromjson(steps.find-commit-pr.outputs.data).repository.object.associatedPullRequests.edges[0].node.mergedBy.__typename }}
@@ -325,6 +337,8 @@ jobs:
           REPOSITORY_OWNER: ${{ github.repository_owner }}
           REPOSITORY_NAME: ${{ github.event.repository.name }}
         run: |
+          PR_APPROVED_BY=$(jq -r '(.repository.object.associatedPullRequests.edges[0].node.reviews.edges[-1].node.author // {}) | select(.__typename == "User") | .login // empty' <<< "${PR_METADATA}")
+
           if [ -z "${PR}" ]; then
             echo "No PR found, skipping..."
             echo "contextMessage=\"\"" >> "${GITHUB_OUTPUT}"
@@ -333,10 +347,13 @@ jobs:
 
           echo "This commit was from PR ${PR}"
 
-          # Only override the Argo trigger author for human PR mergers.
+          # Prefer the human merger. For bot merges, use the latest human approval.
           if [ "${PR_MERGED_BY_TYPE}" = "User" ]; then
             echo "Using ${PR_MERGED_BY} as the rollout owner"
             echo "extra_args=--labels trigger-commit-author=${PR_MERGED_BY}" >> "${GITHUB_OUTPUT}"
+          elif [ -n "${PR_APPROVED_BY}" ]; then
+            echo "Using ${PR_APPROVED_BY} as the rollout owner from PR approval"
+            echo "extra_args=--labels trigger-commit-author=${PR_APPROVED_BY}" >> "${GITHUB_OUTPUT}"
           fi
 
           echo "contextMessage= This deployment was triggered by [this pull request](https://github.com/${REPOSITORY_OWNER}/${REPOSITORY_NAME}/pull/${PR})." >> "${GITHUB_OUTPUT}"
