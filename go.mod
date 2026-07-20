@@ -10,7 +10,7 @@ require (
 	github.com/go-slog/otelslog v0.3.0
 	github.com/google/go-containerregistry v0.21.7
 	github.com/google/uuid v1.6.0
-	github.com/lmittmann/tint v1.1.3
+	github.com/lmittmann/tint v1.2.0
 	github.com/mattn/go-isatty v0.0.23
 	github.com/samber/slog-multi v1.8.0
 	github.com/stretchr/testify v1.11.1
