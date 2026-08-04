@@ -96,7 +96,7 @@ func main() {
 	if cli.Telemetry.Mode.IncludesStdoutLogs() {
 		// If we're on a TTY, we can use a nicer handler
 		if isatty.IsTerminal(os.Stdout.Fd()) {
-			stdoutHandler = tint.NewHandler(os.Stdout, &tint.Options{Level: cli.LogLevel, TimeFormat: time.Kitchen, AddSource: true})
+			stdoutHandler = tint.NewTextHandler(os.Stdout, &tint.Options{Level: cli.LogLevel, TimeFormat: time.Kitchen, AddSource: true})
 		} else {
 			stdoutHandler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: cli.LogLevel, AddSource: true})
 		}
