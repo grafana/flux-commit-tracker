@@ -13,7 +13,7 @@ require (
 	github.com/lmittmann/tint v1.2.0
 	github.com/mattn/go-isatty v0.0.24
 	github.com/samber/slog-multi v1.8.0
-	github.com/stretchr/testify v1.11.1
+	github.com/stretchr/testify v1.12.0
 	go.opentelemetry.io/contrib/bridges/otelslog v0.20.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/httptrace/otelhttptrace v0.70.0
 	go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.70.0
