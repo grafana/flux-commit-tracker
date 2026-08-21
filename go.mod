@@ -50,7 +50,7 @@ require (
 	github.com/fluxcd/pkg/apis/kustomize v1.20.0 // indirect
 	github.com/fluxcd/pkg/apis/meta v1.31.0 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
-	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
+	github.com/fxamacker/cbor/v2 v2.9.3 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-openapi/jsonpointer v1.0.0 // indirect
 	github.com/go-openapi/jsonreference v1.0.0 // indirect
