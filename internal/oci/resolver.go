@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"regexp"
 	"strings"
+	"time"
 
 	otel "go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -16,13 +17,19 @@ import (
 )
 
 const ExporterInfoLayerMediaType = "application/vnd.grafana.exporter-info.v1+json"
+const PushStartTimeAnnotation = "com.grafana.kube-manifests-exporter.oci-image-push-start-time"
 const InstrumentationScope = "oci"
 
 var digestPattern = regexp.MustCompile(`^sha256:[a-fA-F0-9]{64}$`)
 var tracer = otel.Tracer(InstrumentationScope)
 
+type ArtifactInfo struct {
+	ExporterInfo  ExporterInfo
+	PushStartTime time.Time
+}
+
 type Resolver interface {
-	FetchExporterInfo(ctx context.Context, log *slog.Logger, repositoryURL, appliedRevision string) (ExporterInfo, error)
+	FetchArtifactInfo(ctx context.Context, log *slog.Logger, repositoryURL, appliedRevision string) (ArtifactInfo, error)
 }
 
 type registryClient interface {
@@ -42,8 +49,8 @@ func NewResolver() Resolver {
 	}
 }
 
-func (c *resolver) FetchExporterInfo(ctx context.Context, log *slog.Logger, repositoryURL, appliedRevision string) (ExporterInfo, error) {
-	ctx, span := tracer.Start(ctx, "oci.fetch_exporter_info",
+func (c *resolver) FetchArtifactInfo(ctx context.Context, log *slog.Logger, repositoryURL, appliedRevision string) (ArtifactInfo, error) {
+	ctx, span := tracer.Start(ctx, "oci.fetch_artifact_info",
 		trace.WithSpanKind(trace.SpanKindClient),
 		trace.WithAttributes(
 			attribute.String("oci.repository_url", repositoryURL),
@@ -58,7 +65,7 @@ func (c *resolver) FetchExporterInfo(ctx context.Context, log *slog.Logger, repo
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "Failed to build artifact reference")
-		return ExporterInfo{}, fmt.Errorf("building OCI artifact reference: %w", err)
+		return ArtifactInfo{}, fmt.Errorf("building OCI artifact reference: %w", err)
 	}
 	span.SetAttributes(attribute.String("oci.artifact.reference", artifactRef))
 
@@ -68,14 +75,14 @@ func (c *resolver) FetchExporterInfo(ctx context.Context, log *slog.Logger, repo
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "Failed to fetch manifest")
-		return ExporterInfo{}, fmt.Errorf("fetching OCI manifest %q: %w", artifactRef, err)
+		return ArtifactInfo{}, fmt.Errorf("fetching OCI manifest %q: %w", artifactRef, err)
 	}
 
 	layerDigest, err := exporterInfoLayerDigest(manifestBytes)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "Failed to locate exporter-info layer")
-		return ExporterInfo{}, err
+		return ArtifactInfo{}, err
 	}
 	span.SetAttributes(attribute.String("oci.exporter_info.layer_digest", layerDigest))
 
@@ -86,19 +93,37 @@ func (c *resolver) FetchExporterInfo(ctx context.Context, log *slog.Logger, repo
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "Failed to fetch exporter-info layer")
-		return ExporterInfo{}, fmt.Errorf("fetching exporter-info OCI layer %q: %w", layerRef, err)
+		return ArtifactInfo{}, fmt.Errorf("fetching exporter-info OCI layer %q: %w", layerRef, err)
 	}
 
 	info, err := decodeExporterInfo(ctx, layerBlob)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "Failed to decode exporter-info")
-		return ExporterInfo{}, fmt.Errorf("decoding exporter-info OCI layer: %w", err)
+		return ArtifactInfo{}, fmt.Errorf("decoding exporter-info OCI layer: %w", err)
+	}
+
+	artifactInfo := ArtifactInfo{ExporterInfo: info}
+
+	// Read the push-start timestamp from the applied OCI image's annotations.
+	var manifest struct {
+		Annotations map[string]string `json:"annotations"`
+	}
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		return ArtifactInfo{}, fmt.Errorf("decoding OCI manifest annotations: %w", err)
+	}
+	if value := manifest.Annotations[PushStartTimeAnnotation]; value != "" {
+		pushStart, err := time.Parse(time.RFC3339Nano, value)
+		if err != nil {
+			log.WarnContext(ctx, "invalid OCI push-start timestamp, skipping metric", "error", err)
+		} else {
+			artifactInfo.PushStartTime = pushStart
+		}
 	}
 	span.SetAttributes(attribute.Int("kube_manifests.exporter.info.commits_exported", len(info.CommitsSinceLastExport)))
-	span.SetStatus(codes.Ok, "Successfully fetched exporter-info from OCI")
+	span.SetStatus(codes.Ok, "Successfully fetched artifact info from OCI")
 
-	return info, nil
+	return artifactInfo, nil
 }
 
 // buildArtifactReference converts Flux Kustomization status.lastAppliedRevision
