@@ -29,7 +29,8 @@ const (
 	Prefix = "flux-commit-tracker"
 
 	// Metric names
-	MetricE2EExportTime = Prefix + ".e2e.export-time"
+	MetricE2EExportTime      = Prefix + ".e2e.export-time"
+	MetricOCIPushToApplyTime = Prefix + ".oci.push-to-apply-time"
 
 	InstrumentationScope = "tracker"
 )
@@ -40,7 +41,8 @@ var (
 	meter  = otel.Meter(InstrumentationScope)
 
 	// metrics
-	exportTime metric.Float64Histogram
+	exportTime         metric.Float64Histogram
+	ociPushToApplyTime metric.Float64Histogram
 
 	// attributes
 	attrControllerName = attribute.String("k8s.controller.name", "flux-commit-tracker")
@@ -62,6 +64,15 @@ func init() {
 	)
 	if err != nil {
 		panic(fmt.Sprintf("failed to create exportTime histogram: %v", err))
+	}
+
+	ociPushToApplyTime, err = meter.Float64Histogram(
+		MetricOCIPushToApplyTime,
+		metric.WithDescription("Time from OCI push start to successful Flux reconciliation, including upload and discovery delay"),
+		metric.WithUnit("s"),
+	)
+	if err != nil {
+		panic(fmt.Sprintf("failed to create ociPushToApplyTime histogram: %v", err))
 	}
 }
 
@@ -144,6 +155,21 @@ func extractReconciledState(ctx context.Context, log *slog.Logger, k *kustomizev
 	}, nil
 }
 
+// recordOCIPushToApplyTime measures OCI push start to successful reconciliation
+// in the cluster. Each processed image revision produces one observation.
+func recordOCIPushToApplyTime(ctx context.Context, log *slog.Logger, pushStart, timeApplied time.Time, attributes attribute.Set) {
+	if pushStart.IsZero() {
+		log.DebugContext(ctx, "OCI push-start timestamp missing, skipping metric")
+		return
+	}
+	if timeApplied.Before(pushStart) {
+		log.WarnContext(ctx, "invalid OCI push-to-apply interval, skipping metric", "push_start", pushStart, "time_applied", timeApplied)
+		return
+	}
+	duration := timeApplied.Sub(pushStart).Seconds()
+	ociPushToApplyTime.Record(ctx, duration, metric.WithAttributeSet(attributes))
+}
+
 // processDeploymentToolsCommits processes deployment_tools commits from
 // exporter-info metadata.
 func (r *KustomizationReconciler) processDeploymentToolsCommits(
@@ -192,18 +218,18 @@ func (r *KustomizationReconciler) processDeploymentToolsCommits(
 	return nil
 }
 
-func (r *KustomizationReconciler) fetchExporterInfoFromOCI(ctx context.Context, log *slog.Logger, sourceNamespace, sourceName, appliedRevision string) (oci.ExporterInfo, error) {
+func (r *KustomizationReconciler) fetchArtifactInfoFromOCI(ctx context.Context, log *slog.Logger, sourceNamespace, sourceName, appliedRevision string) (oci.ArtifactInfo, error) {
 	repositoryURL, err := r.getOCIRepositoryURL(ctx, sourceNamespace, sourceName)
 	if err != nil {
-		return oci.ExporterInfo{}, fmt.Errorf("failed to resolve OCIRepository URL: %w", err)
+		return oci.ArtifactInfo{}, fmt.Errorf("failed to resolve OCIRepository URL: %w", err)
 	}
 
 	timeoutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	info, err := r.OCI.FetchExporterInfo(timeoutCtx, log, repositoryURL, appliedRevision)
+	info, err := r.OCI.FetchArtifactInfo(timeoutCtx, log, repositoryURL, appliedRevision)
 	if err != nil {
-		return oci.ExporterInfo{}, fmt.Errorf("failed to fetch exporter info from OCI layer: %w", err)
+		return oci.ArtifactInfo{}, fmt.Errorf("failed to fetch artifact info from OCI: %w", err)
 	}
 
 	return info, nil
@@ -252,7 +278,7 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	}
 	span.SetAttributes(attribute.String("k8s.resource.uid", string(kustomization.UID)))
 
-	// 2. Extract Data
+	// 2. Extract the applied OCI revision and successful reconciliation timestamp.
 	state, err := extractReconciledState(ctx, log, kustomization)
 	if err != nil {
 		span.RecordError(err)
@@ -276,18 +302,20 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		attribute.String("k8s.source.kind", state.SourceKind),
 	)
 
-	exporterInfo, err := r.fetchExporterInfoFromOCI(ctx, log, state.SourceNamespace, state.SourceName, state.LastAppliedRevision)
+	artifactInfo, err := r.fetchArtifactInfoFromOCI(ctx, log, state.SourceNamespace, state.SourceName, state.LastAppliedRevision)
 	if err != nil {
 		span.RecordError(err)
-		span.SetStatus(codes.Error, "Failed to fetch exporter-info from OCI")
+		span.SetStatus(codes.Error, "Failed to fetch artifact info from OCI")
 
-		log.ErrorContext(ctx, "failed to fetch exporter-info from OCI", "error", err)
+		log.ErrorContext(ctx, "failed to fetch artifact info from OCI", "error", err)
 
 		return ctrl.Result{}, err
 	}
 
-	// 3. Process `deployment_tools` commits & metrics
-	err = r.processDeploymentToolsCommits(ctx, log, exporterInfo, state.TimeApplied, metricAttributes)
+	recordOCIPushToApplyTime(ctx, log, artifactInfo.PushStartTime, state.TimeApplied, metricAttributes)
+
+	// 3. Record end-to-end latency for each deployment_tools commit.
+	err = r.processDeploymentToolsCommits(ctx, log, artifactInfo.ExporterInfo, state.TimeApplied, metricAttributes)
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, "Failed to process deployment-tools commits")

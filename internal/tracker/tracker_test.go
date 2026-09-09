@@ -22,19 +22,19 @@ import (
 )
 
 type fakeOCIResolver struct {
-	ExporterInfo oci.ExporterInfo
+	ArtifactInfo oci.ArtifactInfo
 	FetchErr     error
 	FetchCalls   int
 }
 
-func (f *fakeOCIResolver) FetchExporterInfo(ctx context.Context, log *slog.Logger, repositoryURL, appliedRevision string) (oci.ExporterInfo, error) {
+func (f *fakeOCIResolver) FetchArtifactInfo(ctx context.Context, log *slog.Logger, repositoryURL, appliedRevision string) (oci.ArtifactInfo, error) {
 	f.FetchCalls++
 
 	if f.FetchErr != nil {
-		return oci.ExporterInfo{}, f.FetchErr
+		return oci.ArtifactInfo{}, f.FetchErr
 	}
 
-	return f.ExporterInfo, nil
+	return f.ArtifactInfo, nil
 }
 
 func setupScheme(t *testing.T) *runtime.Scheme {
@@ -106,13 +106,17 @@ func TestKustomizationReconciler_Reconcile_OCIRepository_Success(t *testing.T) {
 
 	timeApplied := time.Now().Add(-5 * time.Minute).Truncate(time.Second)
 	dtCommitTime := timeApplied.Add(-15 * time.Minute).Truncate(time.Second)
+	pushStartTime := timeApplied.Add(-90 * time.Second)
 
 	kustomization := makeOCIKustomizationObject(namespace, name, namespace, sourceName, ociRevision, timeApplied)
 	ociRepository := makeOCIRepositoryObject(namespace, sourceName, "oci://ghcr.io/grafana/kube-manifests")
 	fakeOCI := &fakeOCIResolver{
-		ExporterInfo: oci.ExporterInfo{
-			CommitsSinceLastExport: []*oci.CommitInfo{
-				{Hash: "fedcba654321", Time: dtCommitTime},
+		ArtifactInfo: oci.ArtifactInfo{
+			PushStartTime: pushStartTime,
+			ExporterInfo: oci.ExporterInfo{
+				CommitsSinceLastExport: []*oci.CommitInfo{
+					{Hash: "fedcba654321", Time: dtCommitTime},
+				},
 			},
 		},
 	}
@@ -142,6 +146,10 @@ func TestKustomizationReconciler_Reconcile_OCIRepository_Success(t *testing.T) {
 	expectedE2ETime := timeApplied.Sub(dtCommitTime).Seconds()
 	otel.AssertMetricValueExists(t, metrics, MetricE2EExportTime)
 	otel.AssertHistogramValue(t, metrics, MetricE2EExportTime, expectedE2ETime)
+
+	expectedPushToApplyTime := timeApplied.Sub(pushStartTime).Seconds()
+	otel.AssertMetricValueExists(t, metrics, MetricOCIPushToApplyTime)
+	otel.AssertHistogramValue(t, metrics, MetricOCIPushToApplyTime, expectedPushToApplyTime)
 }
 
 func TestKustomizationReconciler_Reconcile_OCIRepository_MissingExporterInfoLayer(t *testing.T) {
