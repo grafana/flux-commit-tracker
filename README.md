@@ -48,8 +48,10 @@ that payload.
 
 ## Metrics exported
 
-- `flux_commit_tracker.e2e.export-time`: The time taken for the
+- `flux-commit-tracker.e2e.export-time`: The time taken for the
   deployment_tools commit to be applied by Flux in the cluster.
+- `flux-commit-tracker.oci.push-to-apply-time`: The time taken from OCI push start
+  to successful Flux reconciliation.
 
 [Flux]: https://fluxcd.io/
 [Tanka]: https://tanka.dev/

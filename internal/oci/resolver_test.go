@@ -2,9 +2,12 @@ package oci
 
 import (
 	"context"
+	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -143,6 +146,71 @@ func TestBuildArtifactReference(t *testing.T) {
 
 			require.NoError(t, err)
 			require.Equal(t, tt.wantReference, reference)
+		})
+	}
+}
+
+type fakeRegistry struct {
+	manifest, layer []byte
+	references      []string
+}
+
+func (f *fakeRegistry) GetManifest(_ context.Context, ref string) ([]byte, error) {
+	f.references = append(f.references, ref)
+	return f.manifest, nil
+}
+
+func (f *fakeRegistry) GetLayerBlob(_ context.Context, ref string) ([]byte, error) {
+	f.references = append(f.references, ref)
+	return f.layer, nil
+}
+
+func TestFetchArtifactInfo(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		annotations   any
+		wantPushStart time.Time
+	}{
+		{
+			name:          "valid push-start timestamp",
+			annotations:   map[string]string{PushStartTimeAnnotation: "2026-09-08T17:36:26.123Z"},
+			wantPushStart: time.Date(2026, time.September, 8, 17, 36, 26, 123000000, time.UTC),
+		},
+		{name: "missing annotations"},
+		{
+			name:        "invalid push-start timestamp preserves exporter info",
+			annotations: map[string]string{PushStartTimeAnnotation: "invalid"},
+		},
+		{
+			name:        "invalid annotation type preserves exporter info",
+			annotations: map[string]any{PushStartTimeAnnotation: 123},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var manifest map[string]any
+			require.NoError(t, json.Unmarshal(loadTestFile(t, "manifest_with_exporter_info_layer.json"), &manifest))
+			if tt.annotations != nil {
+				manifest["annotations"] = tt.annotations
+			}
+
+			encoded, err := json.Marshal(manifest)
+			require.NoError(t, err)
+
+			registry := &fakeRegistry{manifest: encoded, layer: loadTestFile(t, "exporter_info.json")}
+			resolver := &resolver{registry: registry}
+			digest := "sha256:6971561bf3f0adf0ae0059420b3778302e4c8e44e2ed27bd9acc900b3a7ed45e"
+			info, err := resolver.FetchArtifactInfo(t.Context(), slog.Default(), "oci://example.com/manifests", "master@"+digest)
+			require.NoError(t, err)
+			require.Equal(t, "cptpicard", info.ExporterInfo.Commit)
+			require.True(t, info.PushStartTime.Equal(tt.wantPushStart))
+			require.Equal(t, []string{
+				"example.com/manifests@" + digest,
+				"example.com/manifests@sha256:3333333333333333333333333333333333333333333333333333333333333333",
+			}, registry.references)
 		})
 	}
 }
