@@ -110,9 +110,8 @@ func (c *resolver) FetchArtifactInfo(ctx context.Context, log *slog.Logger, repo
 		Annotations map[string]string `json:"annotations"`
 	}
 	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
-		return ArtifactInfo{}, fmt.Errorf("decoding OCI manifest annotations: %w", err)
-	}
-	if value := manifest.Annotations[PushStartTimeAnnotation]; value != "" {
+		log.WarnContext(ctx, "invalid OCI manifest annotations, skipping push-to-apply metric", "error", err)
+	} else if value := manifest.Annotations[PushStartTimeAnnotation]; value != "" {
 		pushStart, err := time.Parse(time.RFC3339Nano, value)
 		if err != nil {
 			log.WarnContext(ctx, "invalid OCI push-start timestamp, skipping metric", "error", err)
