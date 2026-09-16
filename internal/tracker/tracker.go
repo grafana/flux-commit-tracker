@@ -15,13 +15,13 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/runtime"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/util/workqueue"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 )
 
 const (
@@ -38,11 +38,6 @@ const (
 var (
 	// otel globals
 	tracer = otel.Tracer(InstrumentationScope)
-	meter  = otel.Meter(InstrumentationScope)
-
-	// metrics
-	exportTime         metric.Float64Histogram
-	ociPushToApplyTime metric.Float64Histogram
 
 	// attributes
 	attrControllerName = attribute.String("k8s.controller.name", "flux-commit-tracker")
@@ -54,35 +49,44 @@ var (
 	}
 )
 
-func init() {
+// Metrics holds the cycle-time histograms used by a reconciler.
+type Metrics struct {
+	exportTime         metric.Float64Histogram
+	ociPushToApplyTime metric.Float64Histogram
+}
+
+// NewMetrics sets up the tracker's cycle-time metrics.
+func NewMetrics(meter metric.Meter) (*Metrics, error) {
+	metrics := &Metrics{}
 	var err error
 
-	exportTime, err = meter.Float64Histogram(
+	metrics.exportTime, err = meter.Float64Histogram(
 		MetricE2EExportTime,
 		metric.WithDescription("Time taken from deployment-tools commit to flux apply"),
 		metric.WithUnit("s"),
 	)
 	if err != nil {
-		panic(fmt.Sprintf("failed to create exportTime histogram: %v", err))
+		return nil, fmt.Errorf("create exportTime histogram: %w", err)
 	}
 
-	ociPushToApplyTime, err = meter.Float64Histogram(
+	metrics.ociPushToApplyTime, err = meter.Float64Histogram(
 		MetricOCIPushToApplyTime,
 		metric.WithDescription("Time from OCI push start to successful Flux reconciliation, including upload and discovery delay"),
 		metric.WithUnit("s"),
 	)
 	if err != nil {
-		panic(fmt.Sprintf("failed to create ociPushToApplyTime histogram: %v", err))
+		return nil, fmt.Errorf("create ociPushToApplyTime histogram: %w", err)
 	}
+	return metrics, nil
 }
 
 // KustomizationReconciler reconciles a Kustomization object, tracking the time
 // taken from deployment-tools commits to flux apply.
 type KustomizationReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
-	Log    *slog.Logger
-	OCI    oci.Resolver
+	Log     *slog.Logger
+	OCI     oci.Resolver
+	Metrics *Metrics
 }
 
 type reconciledState struct {
@@ -93,40 +97,20 @@ type reconciledState struct {
 	TimeApplied         time.Time
 }
 
-// getKustomization fetches the Kustomization object from the cluster. It
-// returns `nil, nil` if the object is not found.
-func (r *KustomizationReconciler) getKustomization(ctx context.Context, req ctrl.Request) (*kustomizev1.Kustomization, error) {
-	ctx, span := tracer.Start(ctx, "getKustomization", trace.WithSpanKind(trace.SpanKindClient))
-	defer span.End()
-
-	var kustomization kustomizev1.Kustomization
-	err := r.Get(ctx, req.NamespacedName, &kustomization)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "Failed to get Kustomization")
-		if apierrors.IsNotFound(err) {
-			r.Log.WarnContext(ctx, "kustomization not found, ignoring", "name", req.Name, "namespace", req.Namespace)
-
-			// It's not going to become available, so don't requeue
-			return nil, nil
-		}
-
-		return nil, fmt.Errorf("failed to get Kustomization: %w", err)
-	}
-
-	span.SetAttributes(attribute.String("k8s.resource.uid", string(kustomization.UID)))
-	span.SetStatus(codes.Ok, "Successfully retrieved Kustomization")
-	return &kustomization, nil
+// measurementRequest saves the revision and apply time when an update arrives,
+// so later reconciliations cannot change the measurement.
+type measurementRequest struct {
+	k8stypes.NamespacedName
+	UID k8stypes.UID
+	reconciledState
 }
 
 // extractReconciledState extracts source/revision metadata and the time of the
 // last successful reconciliation from the Kustomization object.
-func extractReconciledState(ctx context.Context, log *slog.Logger, k *kustomizev1.Kustomization) (reconciledState, error) {
+func extractReconciledState(k *kustomizev1.Kustomization) (reconciledState, error) {
 	revision := k.Status.LastAppliedRevision
 	sourceKind := k.Spec.SourceRef.Kind
 	sourceNamespace := k.Spec.SourceRef.Namespace
-
-	log = log.With("kustomization.revision", revision, "kustomization.sourceKind", sourceKind)
 
 	if revision == "" {
 		return reconciledState{}, fmt.Errorf("kustomization `%s` has no last applied revision", k.GroupVersionKind().String())
@@ -141,8 +125,6 @@ func extractReconciledState(ctx context.Context, log *slog.Logger, k *kustomizev
 	}
 
 	if timeApplied.IsZero() {
-		log.InfoContext(ctx, "kustomization has not reconciled successfully yet, skipping")
-
 		return reconciledState{}, fmt.Errorf("kustomization '%s/%s' has not reconciled successfully yet", k.Namespace, k.Name)
 	}
 
@@ -157,7 +139,7 @@ func extractReconciledState(ctx context.Context, log *slog.Logger, k *kustomizev
 
 // recordOCIPushToApplyTime measures OCI push start to successful reconciliation
 // in the cluster. Each processed image revision produces one observation.
-func recordOCIPushToApplyTime(ctx context.Context, log *slog.Logger, pushStart, timeApplied time.Time, attributes attribute.Set) {
+func (r *KustomizationReconciler) recordOCIPushToApplyTime(ctx context.Context, log *slog.Logger, pushStart, timeApplied time.Time, attributes attribute.Set) {
 	if pushStart.IsZero() {
 		log.DebugContext(ctx, "OCI push-start timestamp missing, skipping metric")
 		return
@@ -167,7 +149,7 @@ func recordOCIPushToApplyTime(ctx context.Context, log *slog.Logger, pushStart, 
 		return
 	}
 	duration := timeApplied.Sub(pushStart).Seconds()
-	ociPushToApplyTime.Record(ctx, duration, metric.WithAttributeSet(attributes))
+	r.Metrics.ociPushToApplyTime.Record(ctx, duration, metric.WithAttributeSet(attributes))
 }
 
 // processDeploymentToolsCommits processes deployment_tools commits from
@@ -178,7 +160,7 @@ func (r *KustomizationReconciler) processDeploymentToolsCommits(
 	exporterInfo oci.ExporterInfo,
 	timeApplied time.Time,
 	metricAttributes attribute.Set,
-) error {
+) {
 	ctx, span := tracer.Start(ctx, "processDeploymentToolsCommits")
 	defer span.End()
 
@@ -189,9 +171,7 @@ func (r *KustomizationReconciler) processDeploymentToolsCommits(
 		log.WarnContext(ctx, "exporter-info contains no deployment-tools commits")
 		span.SetStatus(codes.Ok, "No deployment-tools commits found")
 
-		// Even though this is unexpected, it isn't going to change, so don't
-		// requeue
-		return nil
+		return
 	}
 
 	log.DebugContext(ctx, "processing deployment-tools commits", "count", len(commits))
@@ -200,7 +180,7 @@ func (r *KustomizationReconciler) processDeploymentToolsCommits(
 		// Calculate and record total time from deployment-tools commit to flux
 		// apply (the total time taken for the process)
 		timeFromDeploymentToolsCommitToApply := timeApplied.Sub(commit.Time)
-		exportTime.Record(ctx, timeFromDeploymentToolsCommitToApply.Seconds(),
+		r.Metrics.exportTime.Record(ctx, timeFromDeploymentToolsCommitToApply.Seconds(),
 			metric.WithAttributeSet(metricAttributes),
 		)
 
@@ -215,7 +195,6 @@ func (r *KustomizationReconciler) processDeploymentToolsCommits(
 
 	span.SetStatus(codes.Ok, "Successfully processed deployment-tools commits")
 
-	return nil
 }
 
 func (r *KustomizationReconciler) fetchArtifactInfoFromOCI(ctx context.Context, log *slog.Logger, sourceNamespace, sourceName, appliedRevision string) (oci.ArtifactInfo, error) {
@@ -245,8 +224,10 @@ func (r *KustomizationReconciler) getOCIRepositoryURL(ctx context.Context, names
 	return ociRepository.Spec.URL, nil
 }
 
-// Reconcile is the main reconciliation loop for Kustomization resources.
-func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+// Reconcile processes a successful revision apply. Retries reuse
+// the same revision and apply time so later reconciliations cannot
+// change the measurement.
+func (r *KustomizationReconciler) Reconcile(ctx context.Context, req measurementRequest) (ctrl.Result, error) {
 	log := r.Log.With("name", req.Name, "namespace", req.Namespace)
 
 	spanAttributes := append(
@@ -261,33 +242,8 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	)
 	defer span.End()
 
-	// 1. Fetch Kustomization
-	kustomization, err := r.getKustomization(ctx, req)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "Failed to get Kustomization")
-
-		log.ErrorContext(ctx, "failed to get Kustomization", "error", err)
-
-		return ctrl.Result{}, err
-	}
-
-	if kustomization == nil {
-		span.SetStatus(codes.Ok, "Kustomization not found")
-		return ctrl.Result{}, nil
-	}
-	span.SetAttributes(attribute.String("k8s.resource.uid", string(kustomization.UID)))
-
-	// 2. Extract the applied OCI revision and successful reconciliation timestamp.
-	state, err := extractReconciledState(ctx, log, kustomization)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "Failed to extract reconciled state")
-
-		log.ErrorContext(ctx, "failed to extract reconciled state", "error", err)
-
-		return ctrl.Result{}, err
-	}
+	state := req.reconciledState
+	span.SetAttributes(attribute.String("k8s.resource.uid", string(req.UID)))
 
 	span.SetAttributes(
 		attribute.String("k8s.source.kind", state.SourceKind),
@@ -312,63 +268,50 @@ func (r *KustomizationReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, err
 	}
 
-	recordOCIPushToApplyTime(ctx, log, artifactInfo.PushStartTime, state.TimeApplied, metricAttributes)
+	r.recordOCIPushToApplyTime(ctx, log, artifactInfo.PushStartTime, state.TimeApplied, metricAttributes)
 
-	// 3. Record end-to-end latency for each deployment_tools commit.
-	err = r.processDeploymentToolsCommits(ctx, log, artifactInfo.ExporterInfo, state.TimeApplied, metricAttributes)
-	if err != nil {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, "Failed to process deployment-tools commits")
-
-		log.ErrorContext(ctx, "failed to process deployment-tools commits", "error", err)
-
-		return ctrl.Result{}, err
-	}
+	// Record end-to-end latency for each deployment_tools commit.
+	r.processDeploymentToolsCommits(ctx, log, artifactInfo.ExporterInfo, state.TimeApplied, metricAttributes)
 
 	span.SetStatus(codes.Ok, "Successfully reconciled Kustomization")
 	log.InfoContext(ctx, "successfully processed kustomization event")
 	return ctrl.Result{}, nil
 }
 
-// SetupWithManager sets up the controller with the Manager
+// SetupWithManager watches for successful revision changes.
+// Existing revisions discovered at startup do not generate measurements,
+// because their latest reconciliation time may be later than
+// when they first applied.
 func (r *KustomizationReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	r.Scheme = mgr.GetScheme()
-	return ctrl.NewControllerManagedBy(mgr).
-		For(&kustomizev1.Kustomization{}).
-		WithEventFilter(kustomizationPredicate{}).
+	return builder.TypedControllerManagedBy[measurementRequest](mgr).
+		Named("kustomization").
+		Watches(&kustomizev1.Kustomization{}, handler.TypedFuncs[client.Object, measurementRequest]{
+			UpdateFunc: func(ctx context.Context, e event.UpdateEvent, q workqueue.TypedRateLimitingInterface[measurementRequest]) {
+				previousKustomizationState := e.ObjectOld.(*kustomizev1.Kustomization)
+				updatedKustomizationState := e.ObjectNew.(*kustomizev1.Kustomization)
+
+				// Flux reconciles the same revision repeatedly. We skip these updates
+				// so we only measure when a different revision is applied.
+				if previousKustomizationState.Status.LastAppliedRevision == updatedKustomizationState.Status.LastAppliedRevision {
+					return
+				}
+
+				log := r.Log.With("name", updatedKustomizationState.Name, "namespace", updatedKustomizationState.Namespace)
+				state, err := extractReconciledState(updatedKustomizationState)
+				if err != nil {
+					log.DebugContext(ctx, "revision update has no successful apply timestamp", "error", err)
+					return
+				}
+
+				q.Add(measurementRequest{
+					NamespacedName: k8stypes.NamespacedName{
+						Namespace: updatedKustomizationState.Namespace,
+						Name:      updatedKustomizationState.Name,
+					},
+					UID:             updatedKustomizationState.UID,
+					reconciledState: state,
+				})
+			},
+		}).
 		Complete(r)
-}
-
-// kustomizationPredicate filters events before they are passed to the reconciler
-type kustomizationPredicate struct {
-	predicate.Funcs
-}
-
-// Update filters UpdateEvents. It returns true only if the LastAppliedRevision
-// status field has changed. This allows us to skip processing events where the
-// Kustomization is changed for any other reason.
-func (p kustomizationPredicate) Update(e event.UpdateEvent) bool {
-	if e.ObjectOld == nil || e.ObjectNew == nil {
-		return false // Shouldn't happen normally
-	}
-
-	// Only process Kustomization objects
-	oldKustomization, okOld := e.ObjectOld.(*kustomizev1.Kustomization)
-	newKustomization, okNew := e.ObjectNew.(*kustomizev1.Kustomization)
-	if !okOld || !okNew {
-		return false
-	}
-
-	// Reconcile only if LastAppliedRevision changes and the new revision is not empty
-	newRevision := newKustomization.Status.LastAppliedRevision
-	if oldKustomization.Status.LastAppliedRevision != newRevision && newRevision != "" {
-		// Additionally check if the reconciliation succeeded in the new object
-		for _, condition := range newKustomization.Status.Conditions {
-			if condition.Reason == kustomizev1beta2.ReconciliationSucceededReason && condition.Status == "True" {
-				return true
-			}
-		}
-	}
-
-	return false
 }

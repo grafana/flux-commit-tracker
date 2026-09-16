@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"os"
 	"testing"
 	"time"
 
@@ -24,11 +23,11 @@ import (
 type fakeOCIResolver struct {
 	ArtifactInfo oci.ArtifactInfo
 	FetchErr     error
-	FetchCalls   int
+	Revisions    []string
 }
 
 func (f *fakeOCIResolver) FetchArtifactInfo(ctx context.Context, log *slog.Logger, repositoryURL, appliedRevision string) (oci.ArtifactInfo, error) {
-	f.FetchCalls++
+	f.Revisions = append(f.Revisions, appliedRevision)
 
 	if f.FetchErr != nil {
 		return oci.ArtifactInfo{}, f.FetchErr
@@ -90,185 +89,203 @@ func makeOCIKustomizationObject(namespace, name, sourceNamespace, sourceName, ap
 	}
 }
 
-func TestKustomizationReconciler_Reconcile_OCIRepository_Success(t *testing.T) {
-	ctx := t.Context()
-	testOtel, err := otel.SetupTestTelemetry(ctx, "test-service")
+func makeMeasurementRequest(t *testing.T, kustomization *kustomizev1.Kustomization) measurementRequest {
+	t.Helper()
+	state, err := extractReconciledState(kustomization)
 	require.NoError(t, err)
-	defer func() { _ = testOtel.Shutdown(ctx) }()
+	return measurementRequest{
+		NamespacedName: types.NamespacedName{
+			Name:      kustomization.Name,
+			Namespace: kustomization.Namespace,
+		},
+		UID:             kustomization.UID,
+		reconciledState: state,
+	}
+}
 
-	scheme := setupScheme(t)
-	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+func TestKustomizationReconciler_Reconcile_OCIFetchResults(t *testing.T) {
+	tests := []struct {
+		name     string
+		fetchErr error
+	}{
+		{
+			name: "success",
+		},
+		{
+			name:     "missing exporter-info layer",
+			fetchErr: errors.New("exporter-info OCI layer not found"),
+		},
+	}
 
-	namespace := "test-ns"
-	name := "test-kustomization-oci"
-	sourceName := "kube-manifests-oci"
-	ociRevision := "master@sha256:6971561bf3f0adf0ae0059420b3778302e4c8e44e2ed27bd9acc900b3a7ed45e"
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := t.Context()
+			testOtel, err := otel.SetupTestTelemetry(ctx, "tracker-test")
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, testOtel.Shutdown(context.Background())) })
+			trackerMetrics, err := NewMetrics(testOtel.MeterProvider.Meter(InstrumentationScope))
+			require.NoError(t, err)
 
-	timeApplied := time.Now().Add(-5 * time.Minute).Truncate(time.Second)
-	dtCommitTime := timeApplied.Add(-15 * time.Minute).Truncate(time.Second)
-	pushStartTime := timeApplied.Add(-90 * time.Second)
+			namespace := "test-ns"
+			sourceName := "kube-manifests-oci"
+			ociRevision := "master@sha256:6971561bf3f0adf0ae0059420b3778302e4c8e44e2ed27bd9acc900b3a7ed45e"
+			timeApplied := time.Date(2026, 9, 15, 22, 51, 49, 0, time.UTC)
+			dtCommitTime := timeApplied.Add(-15 * time.Minute)
+			pushStartTime := timeApplied.Add(-90 * time.Second)
 
-	kustomization := makeOCIKustomizationObject(namespace, name, namespace, sourceName, ociRevision, timeApplied)
-	ociRepository := makeOCIRepositoryObject(namespace, sourceName, "oci://ghcr.io/grafana/kube-manifests")
-	fakeOCI := &fakeOCIResolver{
-		ArtifactInfo: oci.ArtifactInfo{
-			PushStartTime: pushStartTime,
-			ExporterInfo: oci.ExporterInfo{
-				CommitsSinceLastExport: []*oci.CommitInfo{
-					{Hash: "fedcba654321", Time: dtCommitTime},
+			kustomization := makeOCIKustomizationObject(namespace, "test-kustomization-oci", namespace, sourceName, ociRevision, timeApplied)
+			ociRepository := makeOCIRepositoryObject(namespace, sourceName, "oci://ghcr.io/grafana/kube-manifests")
+			fakeK8sClient := fake.NewClientBuilder().
+				WithScheme(setupScheme(t)).
+				WithObjects(kustomization, ociRepository).
+				Build()
+
+			fakeOCI := &fakeOCIResolver{
+				FetchErr: tt.fetchErr,
+				ArtifactInfo: oci.ArtifactInfo{
+					PushStartTime: pushStartTime,
+					ExporterInfo: oci.ExporterInfo{
+						CommitsSinceLastExport: []*oci.CommitInfo{
+							{
+								Hash: "fedcba654321",
+								Time: dtCommitTime,
+							},
+						},
+					},
 				},
-			},
-		},
+			}
+			reconciler := &KustomizationReconciler{
+				Client:  fakeK8sClient,
+				Log:     slog.Default(),
+				OCI:     fakeOCI,
+				Metrics: trackerMetrics,
+			}
+
+			req := makeMeasurementRequest(t, kustomization)
+			result, reconcileErr := reconciler.Reconcile(ctx, req)
+			require.Equal(t, ctrl.Result{}, result)
+			require.Equal(t, []string{ociRevision}, fakeOCI.Revisions)
+
+			metrics, err := testOtel.ForceMetricCollection(ctx)
+			require.NoError(t, err)
+			if tt.fetchErr != nil {
+				require.ErrorIs(t, reconcileErr, tt.fetchErr)
+				require.Nil(t, otel.FindMetric(metrics, MetricE2EExportTime))
+				require.Nil(t, otel.FindMetric(metrics, MetricOCIPushToApplyTime))
+				return
+			}
+
+			require.NoError(t, reconcileErr)
+			otel.AssertHistogramValue(t, metrics, MetricE2EExportTime, timeApplied.Sub(dtCommitTime).Seconds())
+			otel.AssertHistogramValue(t, metrics, MetricOCIPushToApplyTime, timeApplied.Sub(pushStartTime).Seconds())
+		})
 	}
-
-	fakeK8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(kustomization, ociRepository).Build()
-	reconciler := &KustomizationReconciler{
-		Client: fakeK8sClient,
-		Scheme: scheme,
-		Log:    log,
-		OCI:    fakeOCI,
-	}
-
-	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      name,
-			Namespace: namespace,
-		},
-	}
-	result, err := reconciler.Reconcile(ctx, req)
-	require.NoError(t, err)
-	require.Equal(t, ctrl.Result{}, result)
-	require.Equal(t, 1, fakeOCI.FetchCalls)
-
-	metrics, err := testOtel.ForceMetricCollection(ctx)
-	require.NoError(t, err)
-
-	expectedE2ETime := timeApplied.Sub(dtCommitTime).Seconds()
-	otel.AssertMetricValueExists(t, metrics, MetricE2EExportTime)
-	otel.AssertHistogramValue(t, metrics, MetricE2EExportTime, expectedE2ETime)
-
-	expectedPushToApplyTime := timeApplied.Sub(pushStartTime).Seconds()
-	otel.AssertMetricValueExists(t, metrics, MetricOCIPushToApplyTime)
-	otel.AssertHistogramValue(t, metrics, MetricOCIPushToApplyTime, expectedPushToApplyTime)
 }
 
-func TestKustomizationReconciler_Reconcile_OCIRepository_MissingExporterInfoLayer(t *testing.T) {
-	ctx := t.Context()
-	scheme := setupScheme(t)
-	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	namespace := "test-ns"
-	name := "test-kustomization-oci-missing-layer"
-	sourceName := "kube-manifests-oci"
-	ociRevision := "master@sha256:6971561bf3f0adf0ae0059420b3778302e4c8e44e2ed27bd9acc900b3a7ed45e"
-	timeApplied := time.Now().Add(-5 * time.Minute).Truncate(time.Second)
-
-	kustomization := makeOCIKustomizationObject(namespace, name, namespace, sourceName, ociRevision, timeApplied)
-	ociRepository := makeOCIRepositoryObject(namespace, sourceName, "oci://ghcr.io/grafana/kube-manifests")
-	fakeOCI := &fakeOCIResolver{FetchErr: errors.New("exporter-info OCI layer not found")}
-
-	fakeK8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(kustomization, ociRepository).Build()
-	reconciler := &KustomizationReconciler{
-		Client: fakeK8sClient,
-		Scheme: scheme,
-		Log:    log,
-		OCI:    fakeOCI,
-	}
-
-	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      name,
-			Namespace: namespace,
+func TestKustomizationReconciler_Reconcile_UsesOriginalRevisionAndTimestamp(t *testing.T) {
+	tests := []struct {
+		name          string
+		retry         bool
+		wantRevisions []string
+	}{
+		{
+			name:          "delayed processing",
+			wantRevisions: []string{"revision-B"},
+		},
+		{
+			name:          "OCI failure then retry",
+			retry:         true,
+			wantRevisions: []string{"revision-B", "revision-B"},
 		},
 	}
-	result, err := reconciler.Reconcile(ctx, req)
 
-	require.Error(t, err)
-	require.Equal(t, ctrl.Result{}, result)
-	require.Equal(t, 1, fakeOCI.FetchCalls)
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testOtel, err := otel.SetupTestTelemetry(t.Context(), "tracker-test")
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, testOtel.Shutdown(context.Background())) })
+			trackerMetrics, err := NewMetrics(testOtel.MeterProvider.Meter(InstrumentationScope))
+			require.NoError(t, err)
 
-func TestKustomizationReconciler_Reconcile_KustomizationNotFound(t *testing.T) {
-	scheme := setupScheme(t)
-	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+			timeApplied := time.Date(2026, 9, 15, 22, 51, 49, 0, time.UTC)
+			kustomization := makeOCIKustomizationObject("test-ns", "test", "test-ns", "source", "revision-B", timeApplied)
+			req := makeMeasurementRequest(t, kustomization)
 
-	namespace := "test-ns"
-	name := "non-existent-kustomization"
+			ociRepository := makeOCIRepositoryObject("test-ns", "source", "oci://example.com/manifests")
+			fakeK8sClient := fake.NewClientBuilder().
+				WithScheme(setupScheme(t)).
+				WithStatusSubresource(kustomization).
+				WithObjects(kustomization, ociRepository).
+				Build()
 
-	fakeK8sClient := fake.NewClientBuilder().WithScheme(scheme).Build()
-	reconciler := &KustomizationReconciler{
-		Client: fakeK8sClient,
-		Scheme: scheme,
-		Log:    log,
-		OCI:    &fakeOCIResolver{},
-	}
-
-	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      name,
-			Namespace: namespace,
-		},
-	}
-	result, err := reconciler.Reconcile(t.Context(), req)
-
-	require.NoError(t, err)
-	require.Equal(t, ctrl.Result{}, result)
-}
-
-func TestKustomizationReconciler_Reconcile_NotYetReconciled(t *testing.T) {
-	scheme := setupScheme(t)
-	log := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-
-	namespace := "test-ns"
-	name := "test-kustomization-pending"
-	ociRevision := "master@sha256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
-	timeApplied := time.Now()
-
-	kustomization := &kustomizev1.Kustomization{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      name,
-			Namespace: namespace,
-			UID:       types.UID("test-uid-pending"),
-		},
-		Spec: kustomizev1.KustomizationSpec{
-			SourceRef: kustomizev1.CrossNamespaceSourceReference{
-				Kind:      "OCIRepository",
-				Name:      "kube-manifests-oci",
-				Namespace: namespace,
-			},
-		},
-		Status: kustomizev1.KustomizationStatus{
-			LastAppliedRevision: ociRevision,
-			Conditions: []metav1.Condition{
-				{
-					Type:               "Ready",
-					Status:             metav1.ConditionFalse,
-					Reason:             "Progressing",
-					LastTransitionTime: metav1.Time{Time: timeApplied},
+			fakeOCI := &fakeOCIResolver{
+				ArtifactInfo: oci.ArtifactInfo{
+					PushStartTime: timeApplied.Add(-10 * time.Second),
+					ExporterInfo: oci.ExporterInfo{
+						CommitsSinceLastExport: []*oci.CommitInfo{
+							{
+								Hash: "commit",
+								Time: timeApplied.Add(-290 * time.Second),
+							},
+						},
+					},
 				},
-			},
+			}
+
+			reconciler := &KustomizationReconciler{
+				Client:  fakeK8sClient,
+				Log:     slog.Default(),
+				OCI:     fakeOCI,
+				Metrics: trackerMetrics,
+			}
+
+			if tt.retry {
+				fakeOCI.FetchErr = errors.New("registry unavailable")
+				_, err := reconciler.Reconcile(t.Context(), req)
+				require.ErrorContains(t, err, "registry unavailable")
+
+				fakeOCI.FetchErr = nil
+			}
+
+			// Flux applies a newer revision before we finish measuring the previous one
+			kustomization.Status.LastAppliedRevision = "revision-C"
+			kustomization.Status.Conditions[0].LastTransitionTime = metav1.NewTime(timeApplied.Add(11 * time.Hour))
+			require.NoError(t, fakeK8sClient.Status().Update(t.Context(), kustomization))
+
+			_, err = reconciler.Reconcile(t.Context(), req)
+			require.NoError(t, err)
+			require.Equal(t, tt.wantRevisions, fakeOCI.Revisions)
+
+			metrics, err := testOtel.ForceMetricCollection(t.Context())
+			require.NoError(t, err)
+			otel.AssertHistogramValue(t, metrics, MetricE2EExportTime, 290)
+			otel.AssertHistogramValue(t, metrics, MetricOCIPushToApplyTime, 10)
+		})
+	}
+}
+
+func TestExtractReconciledState_WithoutSuccessfulTimestamp(t *testing.T) {
+	tests := []struct {
+		name   string
+		status metav1.ConditionStatus
+	}{
+		{
+			name:   "Ready is false",
+			status: metav1.ConditionFalse,
+		},
+		{
+			name:   "Ready is unknown",
+			status: metav1.ConditionUnknown,
 		},
 	}
 
-	fakeOCI := &fakeOCIResolver{}
-	fakeK8sClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(kustomization).Build()
-	reconciler := &KustomizationReconciler{
-		Client: fakeK8sClient,
-		Scheme: scheme,
-		Log:    log,
-		OCI:    fakeOCI,
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kustomization := makeOCIKustomizationObject("test-ns", "test", "test-ns", "source", "revision-B", time.Now())
+			kustomization.Status.Conditions[0].Status = tt.status
+			kustomization.Status.Conditions[0].Reason = "Progressing"
+			_, err := extractReconciledState(kustomization)
+			require.ErrorContains(t, err, "has not reconciled successfully yet")
+		})
 	}
-
-	req := ctrl.Request{
-		NamespacedName: types.NamespacedName{
-			Name:      name,
-			Namespace: namespace,
-		},
-	}
-	result, err := reconciler.Reconcile(t.Context(), req)
-
-	require.Error(t, err)
-	require.EqualError(t, err, "kustomization 'test-ns/test-kustomization-pending' has not reconciled successfully yet")
-	require.Equal(t, ctrl.Result{}, result)
-	require.Equal(t, 0, fakeOCI.FetchCalls)
 }
