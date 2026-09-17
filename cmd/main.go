@@ -20,6 +20,7 @@ import (
 	"github.com/lmittmann/tint"
 	"github.com/mattn/go-isatty"
 	otelruntime "go.opentelemetry.io/contrib/instrumentation/runtime"
+	"go.opentelemetry.io/otel"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -159,11 +160,16 @@ func (cli CLI) run(handler slog.Handler) error {
 		return fmt.Errorf("unable to set ready check up: %w", err)
 	}
 
+	trackerMetrics, err := tracker.NewMetrics(otel.Meter(tracker.InstrumentationScope))
+	if err != nil {
+		return fmt.Errorf("unable to create tracker metrics: %w", err)
+	}
+
 	if err = (&tracker.KustomizationReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Log:    configuredSlogLogger.With("name", "flux-commit-tracker-controller"),
-		OCI:    oci.NewResolver(),
+		Client:  mgr.GetClient(),
+		Log:     configuredSlogLogger.With("name", "flux-commit-tracker-controller"),
+		OCI:     oci.NewResolver(),
+		Metrics: trackerMetrics,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("unable to create controller: %w", err)
 	}

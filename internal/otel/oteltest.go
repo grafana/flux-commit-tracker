@@ -38,6 +38,9 @@ type TestTelemetry struct {
 	// SpanRecorder captures recorded spans
 	SpanRecorder *tracetest.SpanRecorder
 
+	// MeterProvider keeps each test's metrics separate.
+	MeterProvider *sdkmetric.MeterProvider
+
 	// MetricReader allows manual collection of metrics
 	MetricReader *sdkmetric.ManualReader
 
@@ -81,13 +84,15 @@ func SetupTestTelemetry(ctx context.Context, serviceName string) (*TestTelemetry
 	shutdownFuncs = append(shutdownFuncs, tracerProvider.Shutdown)
 	otel.SetTracerProvider(tracerProvider)
 
+	// Give each test its own provider and reader so measurements do not mix
+	// across tests. Tests create their instruments using the returned MeterProvider
+	// rather than the global provider.
 	metricReader := sdkmetric.NewManualReader()
 	meterProvider := sdkmetric.NewMeterProvider(
 		sdkmetric.WithReader(metricReader),
 		sdkmetric.WithResource(res),
 	)
 	shutdownFuncs = append(shutdownFuncs, meterProvider.Shutdown)
-	otel.SetMeterProvider(meterProvider)
 
 	logger := slog.New(slog.DiscardHandler)
 	logExporter := newTestLogExporter()
@@ -120,6 +125,7 @@ func SetupTestTelemetry(ctx context.Context, serviceName string) (*TestTelemetry
 		TraceExporter:  traceExporter,
 		TraceProcessor: bsp,
 		SpanRecorder:   spanRecorder,
+		MeterProvider:  meterProvider,
 		MetricReader:   metricReader,
 		LogExporter:    logExporter,
 		Shutdown:       shutdown,
