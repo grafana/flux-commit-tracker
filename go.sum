@@ -30,8 +30,8 @@ github.com/felixge/httpsnoop v1.1.0 h1:3YtUj32ZZkqZtt3sZZsClsymw/QDuVfpNhoA31zeO
 github.com/felixge/httpsnoop v1.1.0/go.mod h1:Zqxgdd+1Rkcz8euOqdr7lqgCRJztwr5hp9vDSi5UZCE=
 github.com/fluxcd/kustomize-controller/api v1.9.5 h1:Z4CA0cpC9rQmWiJWT9PCNO7+v3PVbAOK+5byHdbtFt8=
 github.com/fluxcd/kustomize-controller/api v1.9.5/go.mod h1:oRSEvNgNs07P6Tu3xtRigWxnxLkUCqatxbDv+gG3tLI=
-github.com/fluxcd/pkg/apis/acl v0.10.0 h1:KPfAmELNvtvaz8wixnm/MYXqa+MJf7ntVVMUU93Aenk=
-github.com/fluxcd/pkg/apis/acl v0.10.0/go.mod h1:a87i2A7AlFO5N2J8CxtzaUCCDmuLLWOHwkKu3eJF5fY=
+github.com/fluxcd/pkg/apis/acl v0.11.0 h1:BxThatpA6qd5Qzwim6/hRu0gdAX0JxNm3PledDuJqXo=
+github.com/fluxcd/pkg/apis/acl v0.11.0/go.mod h1:a87i2A7AlFO5N2J8CxtzaUCCDmuLLWOHwkKu3eJF5fY=
 github.com/fluxcd/pkg/apis/kustomize v1.20.0 h1:Aur2337TwSYGUffDQVlawOR3SJfRvxH7ikEKD6cJSxs=
 github.com/fluxcd/pkg/apis/kustomize v1.20.0/go.mod h1:9FUs77fd/Rh5/mDgZbGBUCL0UqmXiGj8rYywG3T3x+s=
 github.com/fluxcd/pkg/apis/meta v1.31.0 h1:5niQvTirK0wTE0TfRjnUSdmu6GTSbAFzrdnovtZ9rJ8=
