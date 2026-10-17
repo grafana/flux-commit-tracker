@@ -1,6 +1,6 @@
 module github.com/grafana/flux-commit-tracker
 
-go 1.26.0
+go 1.27.0
 
 require (
 	github.com/alecthomas/kong v1.16.1
@@ -48,7 +48,7 @@ require (
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/fluxcd/pkg/apis/acl v0.11.0 // indirect
 	github.com/fluxcd/pkg/apis/kustomize v1.21.0 // indirect
-	github.com/fluxcd/pkg/apis/meta v1.32.0 // indirect
+	github.com/fluxcd/pkg/apis/meta v1.35.0 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.6 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
