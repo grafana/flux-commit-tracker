@@ -19,7 +19,6 @@ import (
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
-	"go.opentelemetry.io/otel/log/global"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/instrumentation"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
@@ -283,7 +282,7 @@ func setupLoggingHandler(ctx context.Context, config Config, baseHandler slog.Ha
 		)
 
 		loggingShutdownFuncs = append(loggingShutdownFuncs, loggerProvider.Shutdown, otlpLogShutdown)
-		global.SetLoggerProvider(loggerProvider)
+		otel.SetLoggerProvider(loggerProvider)
 
 		// Create a handler that sends logs to the global OTLP provider
 		otelBridgeHandler := otelslog.NewHandler("github.com/grafana/flux-commit-tracker")
