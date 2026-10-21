@@ -2,6 +2,9 @@ FROM --platform=${BUILDPLATFORM} golang:1.27.3-alpine3.24@sha256:f2c872bcee949b7
 
 WORKDIR /app
 
+RUN apk add --no-cache 'ca-certificates>=20261020-r0' 'ca-certificates-bundle>=20261020-r0' \
+  && update-ca-certificates
+
 ARG TARGETOS TARGETARCH
 
 ARG VERSION=unknown
