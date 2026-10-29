@@ -4,7 +4,7 @@ go 1.27.3
 
 require (
 	github.com/alecthomas/kong v1.16.1
-	github.com/fluxcd/kustomize-controller/api v1.9.6
+	github.com/fluxcd/kustomize-controller/api v1.10.1
 	github.com/fluxcd/source-controller/api v1.9.6
 	github.com/go-logr/logr v1.4.4
 	github.com/go-slog/otelslog v0.3.0
@@ -47,7 +47,7 @@ require (
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/fluxcd/pkg/apis/acl v0.12.0 // indirect
 	github.com/fluxcd/pkg/apis/kustomize v1.23.0 // indirect
-	github.com/fluxcd/pkg/apis/meta v1.36.0 // indirect
+	github.com/fluxcd/pkg/apis/meta v1.38.0 // indirect
 	github.com/fsnotify/fsnotify v1.10.1 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.6 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
