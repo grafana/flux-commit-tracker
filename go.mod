@@ -3,7 +3,7 @@ module github.com/grafana/flux-commit-tracker
 go 1.27.3
 
 require (
-	github.com/alecthomas/kong v1.16.1
+	github.com/alecthomas/kong v1.17.0
 	github.com/fluxcd/kustomize-controller/api v1.9.6
 	github.com/fluxcd/source-controller/api v1.9.6
 	github.com/go-logr/logr v1.4.4
